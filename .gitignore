@@ -1,0 +1,28 @@
+.env
+backend/.env
+**/.env
+
+# Flutter / Dart
+.dart_tool/
+.packages
+.pub-cache/
+.pub/
+build/
+
+# Node
+node_modules/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS / IDE
+.vscode/
+.idea/
+.DS_Store
+
+# Uploads / runtime
+uploads/
+backend/uploads/

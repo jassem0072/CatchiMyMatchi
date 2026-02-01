@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
+    <title>ScoutAI Front Test</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="container">
+      <header>
+        <h1>ScoutAI – Front Test</h1>
+        <div class="row">
+          <label class="field">
+            <span>Backend URL</span>
+            <input id="backendUrl" type="text" value="http://localhost:3000" />
+          </label>
+          <button id="reloadBtn" class="btn">Reload list</button>
+        </div>
+      </header>
+
+      <section class="card">
+        <h2>Auth (test)</h2>
+        <div class="row wrap">
+          <label class="field">
+            <span>Email</span>
+            <input id="authEmail" type="email" placeholder="player@test.com" />
+          </label>
+          <label class="field">
+            <span>Password</span>
+            <input id="authPassword" type="password" placeholder="123456" />
+          </label>
+          <label class="field">
+            <span>Role</span>
+            <select id="authRole">
+              <option value="player" selected>player</option>
+              <option value="scouter">scouter</option>
+            </select>
+          </label>
+          <button id="registerBtn" class="btn">Sign up</button>
+          <button id="registerPlayerBtn" class="btn">Sign up (player)</button>
+          <button id="registerScouterBtn" class="btn">Sign up (scouter)</button>
+          <button id="loginBtn" class="btn primary">Sign in</button>
+          <button id="logoutBtn" class="btn">Sign out</button>
+        </div>
+        <div class="row wrap">
+          <label class="field">
+            <span>Display name</span>
+            <input id="authDisplayName" type="text" placeholder="Player name" />
+          </label>
+          <label class="field">
+            <span>Position (player)</span>
+            <input id="authPosition" type="text" placeholder="ST" />
+          </label>
+          <label class="field">
+            <span>Nation (player)</span>
+            <input id="authNation" type="text" placeholder="TN" />
+          </label>
+          <label class="field">
+            <span>Portrait (player)</span>
+            <input id="authPortrait" type="file" accept="image/*" />
+          </label>
+        </div>
+        <p id="authStatus" class="muted"></p>
+      </section>
+
+      <section class="card">
+        <h2>Upload a video</h2>
+        <div class="row">
+          <input id="fileInput" type="file" accept="video/*" />
+          <button id="uploadBtn" class="btn primary">Upload</button>
+        </div>
+        <p id="uploadStatus" class="muted"></p>
+      </section>
+
+      <section class="grid">
+        <div class="card">
+          <h2>Videos</h2>
+          <div id="listStatus" class="muted"></div>
+          <div id="videosList" class="list"></div>
+        </div>
+
+        <div class="card">
+          <h2>Player</h2>
+          <p class="muted">Drag on the video to select the player. Then click Analyze.</p>
+          <div class="player-wrap">
+            <video id="player" controls playsinline></video>
+            <canvas id="overlay"></canvas>
+          </div>
+          <div class="row">
+            <button id="analyzeBtn" class="btn primary" disabled>Analyze selection</button>
+            <button id="clearSelectionBtn" class="btn">Clear selection</button>
+          </div>
+          <div id="selectionMeta" class="muted"></div>
+          <div id="playerMeta" class="muted"></div>
+          <div class="analysis-settings">
+            <h3>Analysis settings</h3>
+            <div class="row wrap">
+              <label class="field">
+                <span>Sampling FPS (lower = faster)</span>
+                <input id="samplingFps" type="number" min="1" step="1" value="3" />
+              </label>
+            </div>
+            <div class="muted">Tip: use 1–2 FPS for quick results, 3–5 for better accuracy.</div>
+          </div>
+          <div class="calibration">
+            <h3>Calibration (optional, for real statistics)</h3>
+            <div class="row wrap">
+              <button id="pickCalibA" class="btn">Pick point A</button>
+              <button id="pickCalibB" class="btn">Pick point B</button>
+              <button id="clearCalibBtn" class="btn">Clear calibration</button>
+            </div>
+            <div class="row wrap">
+              <label class="field">
+                <span>Distance A-B (meters)</span>
+                <input id="calibDistance" type="number" min="0" step="0.1" placeholder="18" />
+              </label>
+              <label class="field">
+                <span>A x</span>
+                <input id="calibAx" type="number" step="1" placeholder="0" />
+              </label>
+              <label class="field">
+                <span>A y</span>
+                <input id="calibAy" type="number" step="1" placeholder="0" />
+              </label>
+              <label class="field">
+                <span>B x</span>
+                <input id="calibBx" type="number" step="1" placeholder="0" />
+              </label>
+              <label class="field">
+                <span>B y</span>
+                <input id="calibBy" type="number" step="1" placeholder="0" />
+              </label>
+            </div>
+            <div id="calibStatus" class="muted"></div>
+          </div>
+          <div id="analysisResult" class="analysis"></div>
+
+          <div class="player-card-wrap">
+            <h3>Player card</h3>
+            <div class="row wrap">
+              <label class="field">
+                <span>Name</span>
+                <input id="cardName" type="text" value="SCOUT AI" />
+              </label>
+              <label class="field">
+                <span>Position</span>
+                <input id="cardPos" type="text" value="MOC" />
+              </label>
+              <label class="field">
+                <span>Nation</span>
+                <input id="cardNation" type="text" value="TN" />
+              </label>
+            </div>
+            <div id="playerCard" class="fifa-card hidden">
+              <div class="fifa-card-inner">
+                <div class="fifa-top">
+                  <div class="fifa-ovr">
+                    <div id="cardOvr" class="fifa-ovr-num">--</div>
+                    <div id="cardPosOut" class="fifa-ovr-pos">MOC</div>
+                    <div id="cardNationOut" class="fifa-ovr-nation">TN</div>
+                  </div>
+                  <div class="fifa-portrait">
+                    <img id="cardPortrait" alt="" />
+                  </div>
+                </div>
+                <div id="cardNameOut" class="fifa-name">SCOUT AI</div>
+                <div class="fifa-stats">
+                  <div class="fifa-col">
+                    <div><span id="statPAC" class="fifa-num">--</span> <span class="fifa-lbl">PAC</span></div>
+                    <div><span id="statSHO" class="fifa-num">--</span> <span class="fifa-lbl">SHO</span></div>
+                    <div><span id="statPAS" class="fifa-num">--</span> <span class="fifa-lbl">PAS</span></div>
+                  </div>
+                  <div class="fifa-col">
+                    <div><span id="statDRI" class="fifa-num">--</span> <span class="fifa-lbl">DRI</span></div>
+                    <div><span id="statDEF" class="fifa-num">--</span> <span class="fifa-lbl">DEF</span></div>
+                    <div><span id="statPHY" class="fifa-num">--</span> <span class="fifa-lbl">PHY</span></div>
+                  </div>
+                </div>
+                <div id="cardNote" class="fifa-note"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <footer class="muted">
+        Tips: you can open DevTools console to see request errors.
+      </footer>
+    </div>
+
+    <script src="app.js?v=8"></script>
+  </body>
+</html>

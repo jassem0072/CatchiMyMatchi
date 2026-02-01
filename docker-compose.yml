@@ -1,0 +1,57 @@
+services:
+  mongo:
+    image: mongo:7
+    container_name: scoutai-mongo
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: scoutai-backend
+    restart: unless-stopped
+    depends_on:
+      - mongo
+    environment:
+      PORT: "3000"
+      MONGODB_URI: "mongodb://mongo:27017/scoutai"
+      AI_SERVICE_URL: "${AI_SERVICE_URL:-http://ai:8001}"
+      JWT_SECRET: "change_me"
+      JWT_EXPIRES_IN: "7d"
+      SWAGGER_ENABLED: "1"
+      UPLOAD_DIR: "/data/uploads"
+      CORS_ORIGINS: "*"
+      GOOGLE_CLIENT_ID: "66881653867-f6mskh181jvj0i77kh8akmfu5f8g6frm.apps.googleusercontent.com"
+      SMTP_HOST: "${SMTP_HOST:-}"
+      SMTP_PORT: "${SMTP_PORT:-587}"
+      SMTP_USER: "${SMTP_USER:-}"
+      SMTP_PASS: "${SMTP_PASS:-}"
+      SMTP_FROM: "${SMTP_FROM:-}"
+      APP_BASE_URL: "${APP_BASE_URL:-}"
+    ports:
+      - "3000:3000"
+    volumes:
+      - uploads_data:/data/uploads
+
+  ai:
+    profiles:
+      - ai
+    build:
+      context: ./ai
+      dockerfile: Dockerfile
+    container_name: scoutai-ai
+    restart: unless-stopped
+    environment:
+      SCOUTAI_YOLO_MODEL: "yolov8n.pt"
+      SCOUTAI_YOLO_IMG_SIZE: "640"
+      SCOUTAI_AUTO_CALIBRATION: "1"
+    ports:
+      - "8001:8001"
+
+volumes:
+  mongo_data:
+  uploads_data:
