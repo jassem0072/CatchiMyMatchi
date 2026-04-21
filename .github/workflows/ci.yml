@@ -48,8 +48,8 @@ jobs:
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: "3.32"
           channel: stable
+          flutter-version: "3.41.7"
           cache: true
 
       - name: Install dependencies
@@ -71,13 +71,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Ensure .env exists for docker compose
+        run: |
+          if [ ! -f .env ]; then
+            touch .env
+          fi
+
       - name: Build & start services
         run: docker compose up -d --build backend mongo
 
       - name: Wait for backend
         run: |
           for i in $(seq 1 30); do
-            if curl -sf http://localhost:3000 > /dev/null 2>&1; then
+            if curl -sf http://localhost:3000/health > /dev/null 2>&1; then
               echo "Backend is up"
               exit 0
             fi
