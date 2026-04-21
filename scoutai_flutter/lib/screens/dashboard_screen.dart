@@ -28,7 +28,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
           children: [
             Icon(Icons.insert_chart_outlined, size: 20),
             SizedBox(width: 10),
-            Text('Player Analysis'),
+            Flexible(
+              child: Text(
+                'Player Analysis',
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
           ],
         ),
         actions: [
@@ -52,7 +57,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
             )
           : null,
       bottomNavigationBar: NavigationBar(
-        backgroundColor: AppColors.surface.withValues(alpha: 0.95),
+        backgroundColor: AppColors.surf(context).withValues(alpha: 0.95),
         selectedIndex: _navIndex,
         onDestinationSelected: (v) => setState(() => _navIndex = v),
         destinations: const [
@@ -223,11 +228,11 @@ class _ExploreTabState extends State<_ExploreTab> {
           decoration: InputDecoration(
             hintText: 'Search players or matches',
             prefixIcon: const Icon(Icons.search),
-            fillColor: AppColors.surface.withValues(alpha: 0.7),
+            fillColor: AppColors.surf(context).withValues(alpha: 0.7),
             filled: true,
             enabledBorder: OutlineInputBorder(
               borderRadius: BorderRadius.circular(16),
-              borderSide: BorderSide(color: AppColors.border.withValues(alpha: 0.8)),
+              borderSide: BorderSide(color: AppColors.bdr(context).withValues(alpha: 0.8)),
             ),
             focusedBorder: OutlineInputBorder(
               borderRadius: BorderRadius.circular(16),
@@ -322,10 +327,10 @@ class _PlayerCard extends StatelessWidget {
         children: [
           Row(
             children: [
-              const CircleAvatar(
+              CircleAvatar(
                 radius: 22,
                 backgroundColor: Color(0xFF1B2A44),
-                child: Icon(Icons.person, color: AppColors.text),
+                child: Icon(Icons.person, color: AppColors.tx(context)),
               ),
               const SizedBox(width: 12),
               Expanded(
@@ -407,7 +412,7 @@ class _PlayerCard extends StatelessWidget {
                     child: LinearProgressIndicator(
                       minHeight: 8,
                       value: item.progress ?? 0.68,
-                      backgroundColor: AppColors.border,
+                      backgroundColor: AppColors.bdr(context),
                       color: AppColors.primary,
                     ),
                   ),
@@ -454,9 +459,9 @@ class _FilterChip extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
       decoration: BoxDecoration(
-        color: AppColors.surface.withValues(alpha: 0.9),
+        color: AppColors.surf(context).withValues(alpha: 0.9),
         borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: AppColors.border.withValues(alpha: 0.9)),
+        border: Border.all(color: AppColors.bdr(context).withValues(alpha: 0.9)),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,

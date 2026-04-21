@@ -1,18 +1,148 @@
+import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 
 import '../app/scoutai_app.dart';
+import '../services/api_config.dart';
+import '../services/auth_storage.dart';
 import '../theme/app_colors.dart';
+import '../services/translations.dart';
 import '../widgets/common.dart';
 
-class AnalysisProgressScreen extends StatelessWidget {
+/// Receives route arguments:
+/// ```
+/// { 'videoId': String, 'selection': { t0, x, y, w, h } }
+/// ```
+/// Calls POST /videos/:id/analyze and shows progress, then navigates to details.
+class AnalysisProgressScreen extends StatefulWidget {
   const AnalysisProgressScreen({super.key});
 
   @override
-  Widget build(BuildContext context) {
-    const progress = 0.65;
+  State<AnalysisProgressScreen> createState() => _AnalysisProgressScreenState();
+}
 
+class _AnalysisProgressScreenState extends State<AnalysisProgressScreen>
+    with SingleTickerProviderStateMixin {
+  bool _started = false;
+  bool _done = false;
+  String? _error;
+  Map<String, dynamic>? _result;
+
+  // Animated progress ring
+  late final AnimationController _ringCtrl;
+  int _stepIndex = 0; // 0=uploading, 1=identification, 2=movements, 3=heatmaps
+
+  final _steps = const [
+    'Sending video to AI engine',
+    'Player identification (YOLO)',
+    'Tracking & movement detection',
+    'Computing metrics & heatmap',
+  ];
+
+  @override
+  void initState() {
+    super.initState();
+    _ringCtrl = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 2),
+    )..repeat();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (!_started) {
+      _started = true;
+      _runAnalysis();
+    }
+  }
+
+  @override
+  void dispose() {
+    _ringCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _runAnalysis() async {
+    final args = ModalRoute.of(context)?.settings.arguments;
+    if (args is! Map<String, dynamic>) {
+      setState(() => _error = 'Missing analysis parameters.');
+      return;
+    }
+
+    final videoId = args['videoId'] as String?;
+    final selection = args['selection'] as Map<String, dynamic>?;
+    if (videoId == null || selection == null) {
+      setState(() => _error = 'Invalid parameters (videoId or selection missing).');
+      return;
+    }
+
+    final token = await AuthStorage.loadToken();
+    if (token == null) {
+      if (!mounted) return;
+      Navigator.of(context).pushNamedAndRemoveUntil(AppRoutes.login, (_) => false);
+      return;
+    }
+
+    // Step progression simulation (since the API is synchronous / long-running)
+    _advanceSteps();
+
+    try {
+      final uri = Uri.parse('${ApiConfig.baseUrl}/videos/$videoId/analyze');
+      final res = await http.post(
+        uri,
+        headers: {
+          'Authorization': 'Bearer $token',
+          'Content-Type': 'application/json',
+        },
+        body: jsonEncode({
+          'selection': selection,
+          'samplingFps': 2,
+        }),
+      );
+
+      if (!mounted) return;
+
+      if (res.statusCode >= 400) {
+        setState(() {
+          _error = 'Analysis failed (${res.statusCode}): ${res.body.length > 300 ? res.body.substring(0, 300) : res.body}';
+        });
+        return;
+      }
+
+      final data = jsonDecode(res.body) as Map<String, dynamic>;
+      setState(() {
+        _done = true;
+        _result = data;
+        _stepIndex = _steps.length; // all done
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _error = 'Error: $e');
+    }
+  }
+
+  /// Advance step indicators while waiting for the API response
+  void _advanceSteps() async {
+    for (var i = 1; i < _steps.length; i++) {
+      await Future.delayed(const Duration(seconds: 4));
+      if (!mounted || _done || _error != null) return;
+      setState(() => _stepIndex = i);
+    }
+  }
+
+  void _viewResult() {
+    if (_result == null) return;
+    Navigator.of(context).pushReplacementNamed(
+      AppRoutes.details,
+      arguments: _result, // pass raw AI response
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
     return GradientScaffold(
       extendBodyBehindAppBar: true,
       appBar: AppBar(
@@ -20,119 +150,177 @@ class AnalysisProgressScreen extends StatelessWidget {
           icon: const Icon(Icons.arrow_back),
           onPressed: () => Navigator.of(context).pop(),
         ),
-        title: const Text('AI Analysis Progress'),
+        title: Text(S.of(context).aiAnalysis),
       ),
       body: Padding(
         padding: const EdgeInsets.fromLTRB(18, 14, 18, 24),
         child: Column(
           children: [
             const SizedBox(height: 10),
-            const Pill(label: 'Running', color: AppColors.primary, icon: Icons.sync),
-            const SizedBox(height: 18),
-            const Text(
-              'Match ID #29381',
-              style: TextStyle(fontWeight: FontWeight.w900, fontSize: 28),
-            ),
-            const SizedBox(height: 6),
-            const Text(
-              'Real Madrid vs. Barcelona',
-              style: TextStyle(color: AppColors.textMuted, fontWeight: FontWeight.w700),
-            ),
-            const SizedBox(height: 26),
-            Expanded(
-              child: Center(
-                child: SizedBox(
-                  height: 220,
-                  width: 220,
-                  child: Stack(
-                    alignment: Alignment.center,
+
+            if (_error != null) ...[
+              const Pill(label: 'Error', color: AppColors.danger, icon: Icons.error_outline),
+              const SizedBox(height: 18),
+              Expanded(
+                child: Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
                     children: [
-                      CustomPaint(
-                        size: const Size(220, 220),
-                        painter: _RingPainter(progress),
+                      const Icon(Icons.error_outline, size: 64, color: AppColors.danger),
+                      const SizedBox(height: 18),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 16),
+                        child: Text(
+                          _error!,
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(color: AppColors.danger, fontWeight: FontWeight.w600),
+                        ),
                       ),
-                      Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Text(
-                            '${(progress * 100).round()}%',
-                            style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 44),
-                          ),
-                          const SizedBox(height: 6),
-                          const Text(
-                            'PROCESSED',
-                            style: TextStyle(
-                              color: AppColors.textMuted,
-                              fontWeight: FontWeight.w900,
-                              letterSpacing: 2.4,
-                            ),
-                          ),
-                        ],
+                      const SizedBox(height: 28),
+                      FilledButton(
+                        onPressed: () => Navigator.of(context).pop(),
+                        child: Text(S.of(context).goBack),
                       ),
                     ],
                   ),
                 ),
               ),
-            ),
-            GlassCard(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Row(
-                    children: [
-                      Container(
-                        height: 40,
-                        width: 40,
-                        decoration: BoxDecoration(
-                          color: AppColors.surface2,
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(color: AppColors.border.withValues(alpha: 0.9)),
-                        ),
-                        child: const Icon(Icons.timer_outlined, color: AppColors.primary),
-                      ),
-                      const SizedBox(width: 12),
-                      const Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
+            ] else if (!_done) ...[
+              Pill(label: S.of(context).analyzing, color: AppColors.primary, icon: Icons.sync),
+              const SizedBox(height: 18),
+              Text(
+                S.of(context).aiProcessing,
+                style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 22),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                S.of(context).mayTakeFewMinutes,
+                style: TextStyle(color: AppColors.txMuted(context), fontWeight: FontWeight.w700),
+              ),
+              const SizedBox(height: 26),
+              Expanded(
+                child: Center(
+                  child: SizedBox(
+                    height: 220,
+                    width: 220,
+                    child: AnimatedBuilder(
+                      animation: _ringCtrl,
+                      builder: (_, __) {
+                        final fakeProgress = (_stepIndex / _steps.length).clamp(0.0, 0.95);
+                        return Stack(
+                          alignment: Alignment.center,
                           children: [
-                            Text(
-                              'ESTIMATED TIME REMAINING',
-                              style: TextStyle(
-                                color: AppColors.textMuted,
-                                fontWeight: FontWeight.w900,
-                                letterSpacing: 1.2,
-                                fontSize: 12,
-                              ),
+                            CustomPaint(
+                              size: const Size(220, 220),
+                              painter: _RingPainter(fakeProgress, _ringCtrl.value),
                             ),
+                            Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Text(
+                                  '${(fakeProgress * 100).round()}%',
+                                  style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 44),
+                                ),
+                                const SizedBox(height: 6),
+                                const Text(
+                                  'PROCESSING',
+                                  style: TextStyle(
+                                    color: AppColors.textMuted,
+                                    fontWeight: FontWeight.w900,
+                                    letterSpacing: 2.4,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ],
+                        );
+                      },
+                    ),
+                  ),
+                ),
+              ),
+
+              // Step list
+              GlassCard(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    for (var i = 0; i < _steps.length; i++)
+                      _StepRow(
+                        label: _steps[i],
+                        done: i < _stepIndex,
+                        running: i == _stepIndex,
+                      ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 18),
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(),
+                child: const Text('Cancel', style: TextStyle(color: AppColors.textMuted)),
+              ),
+            ] else ...[
+              Pill(label: S.of(context).complete, color: AppColors.success, icon: Icons.check_circle),
+              const SizedBox(height: 18),
+              Text(
+                S.of(context).analysisComplete,
+                style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 22),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                S.of(context).aiFinished,
+                style: TextStyle(color: AppColors.txMuted(context), fontWeight: FontWeight.w700),
+              ),
+              const SizedBox(height: 26),
+              Expanded(
+                child: Center(
+                  child: SizedBox(
+                    height: 220,
+                    width: 220,
+                    child: Stack(
+                      alignment: Alignment.center,
+                      children: [
+                        CustomPaint(
+                          size: const Size(220, 220),
+                          painter: _RingPainter(1.0, 0),
+                        ),
+                        const Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.check_circle, size: 64, color: AppColors.success),
                             SizedBox(height: 6),
                             Text(
-                              'approx. 4 mins left',
-                              style: TextStyle(fontWeight: FontWeight.w900, fontSize: 18),
+                              'DONE',
+                              style: TextStyle(
+                                color: AppColors.success,
+                                fontWeight: FontWeight.w900,
+                                letterSpacing: 2.4,
+                              ),
                             ),
                           ],
                         ),
-                      ),
-                    ],
+                      ],
+                    ),
                   ),
-                  const SizedBox(height: 14),
-                  const _StepRow(done: true, label: 'Uploading and frame extraction'),
-                  const _StepRow(done: true, label: 'Player identification'),
-                  const _StepRow(running: true, label: 'Detecting player movements...'),
-                  const _StepRow(label: 'Generating heatmaps'),
-                ],
+                ),
               ),
-            ),
-            const SizedBox(height: 18),
-            TextButton(
-              onPressed: () {},
-              child: const Text('Cancel Analysis', style: TextStyle(color: AppColors.textMuted)),
-            ),
-            const SizedBox(height: 6),
-            FilledButton(
-              onPressed: () => Navigator.of(context).pushNamed(AppRoutes.details),
-              child: const Text('View Sample Result'),
-            ),
+
+              GlassCard(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    for (final step in _steps) _StepRow(label: step, done: true),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 18),
+              FilledButton(
+                onPressed: _viewResult,
+                child: Text(S.of(context).viewResults),
+              ),
+            ],
           ],
         ),
       ),
@@ -173,7 +361,7 @@ class _StepRow extends StatelessWidget {
             child: Text(
               label,
               style: TextStyle(
-                color: done ? AppColors.text : AppColors.textMuted,
+                color: done ? AppColors.tx(context) : AppColors.txMuted(context),
                 fontWeight: FontWeight.w700,
               ),
             ),
@@ -185,14 +373,14 @@ class _StepRow extends StatelessWidget {
 }
 
 class _RingPainter extends CustomPainter {
-  _RingPainter(this.progress);
+  _RingPainter(this.progress, this.rotation);
 
   final double progress;
+  final double rotation;
 
   @override
   void paint(Canvas canvas, Size size) {
-    final rect = Offset.zero & size;
-    final center = rect.center;
+    final center = (Offset.zero & size).center;
     final radius = math.min(size.width, size.height) / 2 - 10;
 
     final bg = Paint()
@@ -204,12 +392,12 @@ class _RingPainter extends CustomPainter {
     final fg = Paint()
       ..style = PaintingStyle.stroke
       ..strokeWidth = 12
-      ..color = AppColors.primary
+      ..color = progress >= 1.0 ? AppColors.success : AppColors.primary
       ..strokeCap = StrokeCap.round;
 
     canvas.drawCircle(center, radius, bg);
 
-    final start = -math.pi / 2;
+    final start = -math.pi / 2 + (progress < 1.0 ? rotation * 0.3 : 0);
     final sweep = 2 * math.pi * progress;
     canvas.drawArc(
       Rect.fromCircle(center: center, radius: radius),
@@ -221,5 +409,6 @@ class _RingPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant _RingPainter oldDelegate) => oldDelegate.progress != progress;
+  bool shouldRepaint(covariant _RingPainter old) =>
+      old.progress != progress || old.rotation != rotation;
 }

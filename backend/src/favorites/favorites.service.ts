@@ -30,6 +30,11 @@ export class FavoritesService {
     return this.favModel.find({ scouterId }).sort({ createdAt: -1 }).lean();
   }
 
+  /** List all favorites targeting a specific player (to find all scouters following them) */
+  async listByPlayer(playerId: string): Promise<Favorite[]> {
+    return this.favModel.find({ playerId }).lean();
+  }
+
   async isFavorite(scouterId: string, playerId: string): Promise<boolean> {
     const f = await this.favModel.findOne({ scouterId, playerId }).lean();
     return Boolean(f);

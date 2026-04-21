@@ -36,7 +36,7 @@ let PlayersService = class PlayersService {
     }
     async list(scouterId) {
         const players = await this.users.listPlayers();
-        const favs = await this.favorites.list(scouterId);
+        const favs = scouterId ? await this.favorites.list(scouterId) : [];
         const favSet = new Set(favs.map((f) => f.playerId));
         return players.map((p) => ({
             ...p,
@@ -47,12 +47,18 @@ let PlayersService = class PlayersService {
         const p = await this.users.getById(playerId);
         if (p.role !== 'player')
             throw new common_1.NotFoundException('Player not found');
-        const isFavorite = await this.favorites.isFavorite(scouterId, playerId);
+        const isFavorite = scouterId ? await this.favorites.isFavorite(scouterId, playerId) : false;
         const { passwordHash, ...safe } = p;
         return { ...safe, isFavorite };
     }
     async getPlayerVideos(playerId) {
         return this.videos.listByOwner(playerId);
+    }
+    async getPlayerPortrait(playerId) {
+        const p = await this.users.getById(playerId);
+        if (p.role !== 'player')
+            throw new common_1.NotFoundException('Player not found');
+        return this.users.getPortraitForUserOrMigrateFromFile(playerId);
     }
     async dashboard(playerId, scouterId) {
         const player = await this.getPlayer(playerId, scouterId);

@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 
 import '../app/scoutai_app.dart';
 import '../services/auth_api.dart';
+import '../services/translations.dart';
 import '../theme/app_colors.dart';
 import '../widgets/common.dart';
 
@@ -111,7 +112,7 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
   Widget build(BuildContext context) {
     return GradientScaffold(
       appBar: AppBar(
-        title: const Text('Forgot Password'),
+        title: Text(S.of(context).forgotPassword),
       ),
       body: ListView(
         padding: const EdgeInsets.fromLTRB(24, 18, 24, 28),
@@ -119,19 +120,19 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
           const SizedBox(height: 8),
           const Center(child: AppLogo(size: 72)),
           const SizedBox(height: 18),
-          const Text(
-            'Reset your password',
-            style: TextStyle(fontWeight: FontWeight.w900, fontSize: 22),
+          Text(
+            S.of(context).resetYourPassword,
+            style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 22),
           ),
           const SizedBox(height: 10),
-          const Text(
-            'Enter your email, request a reset token, then check your email and open the link (or paste the token) to choose a new password.',
-            style: TextStyle(color: AppColors.textMuted, fontWeight: FontWeight.w600),
+          Text(
+            S.of(context).resetInstructions,
+            style: TextStyle(color: AppColors.txMuted(context), fontWeight: FontWeight.w600),
           ),
           const SizedBox(height: 22),
-          const Text(
-            'EMAIL',
-            style: TextStyle(
+          Text(
+            S.of(context).emailAddress,
+            style: const TextStyle(
               color: AppColors.textMuted,
               fontWeight: FontWeight.w800,
               letterSpacing: 1.2,
@@ -150,12 +151,12 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
           const SizedBox(height: 12),
           OutlinedButton(
             onPressed: _busy ? null : _requestToken,
-            child: const Text('Request reset token'),
+            child: Text(S.of(context).requestResetToken),
           ),
           const SizedBox(height: 18),
-          const Text(
-            'TOKEN',
-            style: TextStyle(
+          Text(
+            S.of(context).token,
+            style: const TextStyle(
               color: AppColors.textMuted,
               fontWeight: FontWeight.w800,
               letterSpacing: 1.2,
@@ -165,15 +166,15 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
           const SizedBox(height: 10),
           TextField(
             controller: _tokenCtrl,
-            decoration: const InputDecoration(
-              hintText: 'Paste token here',
+            decoration: InputDecoration(
+              hintText: S.of(context).pasteToken,
               prefixIcon: Icon(Icons.key_outlined),
             ),
           ),
           const SizedBox(height: 18),
-          const Text(
-            'NEW PASSWORD',
-            style: TextStyle(
+          Text(
+            S.of(context).newPasswordLabel,
+            style: const TextStyle(
               color: AppColors.textMuted,
               fontWeight: FontWeight.w800,
               letterSpacing: 1.2,
@@ -206,7 +207,7 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
           ],
           FilledButton(
             onPressed: _busy ? null : _resetPassword,
-            child: const Text('Reset password'),
+            child: Text(S.of(context).resetPassword),
           ),
         ],
       ),

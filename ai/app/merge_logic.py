@@ -36,9 +36,11 @@ def merge_chunks(chunks: list[dict]) -> dict:
     ts = np.array([p["t"] for p in positions], dtype=float)
     cxs = np.array([p["cx"] for p in positions], dtype=float)
     cys = np.array([p["cy"] for p in positions], dtype=float)
+    ncxs = np.array([p.get("ncx", p["cx"]) for p in positions], dtype=float)
+    ncys = np.array([p.get("ncy", p["cy"]) for p in positions], dtype=float)
 
     # Merge recomputes metrics without calibration info (stateless contract).
-    m = compute_metrics(ts, cxs, cys, None)
+    m = compute_metrics(ts, cxs, cys, None, norm_xs=ncxs, norm_ys=ncys)
 
     return {
         "frameSamplingFps": sampling,

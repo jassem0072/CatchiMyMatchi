@@ -1,0 +1,67 @@
+name: CD - Android Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+concurrency:
+  group: cd-android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  release:
+    name: Build & Deploy to Google Play
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: scoutai_flutter
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.32"
+          channel: stable
+          cache: true
+
+      - name: Setup Ruby (for Fastlane)
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+          bundler-cache: true
+          working-directory: scoutai_flutter/android
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Decode keystore
+        run: |
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > android/app/keystore.jks
+        working-directory: scoutai_flutter
+
+      - name: Build release AAB
+        run: |
+          flutter build appbundle --release \
+            --dart-define=API_BASE_URL=${{ secrets.API_BASE_URL }}
+        env:
+          KEYSTORE_PATH: keystore.jks
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+
+      - name: Deploy to Google Play (Internal Track)
+        run: |
+          cd android
+          bundle install
+          bundle exec fastlane deploy
+        env:
+          SUPPLY_JSON_KEY: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
+
+      - name: Upload AAB artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-aab
+          path: scoutai_flutter/build/app/outputs/bundle/release/app-release.aab

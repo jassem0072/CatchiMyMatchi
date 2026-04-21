@@ -9,7 +9,7 @@ var __metadata = (this && this.__metadata) || function (k, v) {
     if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.AuthTokenResponse = exports.LoginDto = exports.RegisterDto = void 0;
+exports.AuthTokenResponse = exports.GoogleAuthDto = exports.OkResponse = exports.ResetPasswordDto = exports.ForgotPasswordResponse = exports.ForgotPasswordDto = exports.LoginDto = exports.RegisterDto = void 0;
 const swagger_1 = require("@nestjs/swagger");
 class RegisterDto {
 }
@@ -22,10 +22,6 @@ __decorate([
     (0, swagger_1.ApiProperty)(),
     __metadata("design:type", String)
 ], RegisterDto.prototype, "password", void 0);
-__decorate([
-    (0, swagger_1.ApiPropertyOptional)({ enum: ['player', 'scouter'] }),
-    __metadata("design:type", String)
-], RegisterDto.prototype, "role", void 0);
 __decorate([
     (0, swagger_1.ApiPropertyOptional)(),
     __metadata("design:type", String)
@@ -49,6 +45,57 @@ __decorate([
     (0, swagger_1.ApiProperty)(),
     __metadata("design:type", String)
 ], LoginDto.prototype, "password", void 0);
+class ForgotPasswordDto {
+}
+exports.ForgotPasswordDto = ForgotPasswordDto;
+__decorate([
+    (0, swagger_1.ApiProperty)(),
+    __metadata("design:type", String)
+], ForgotPasswordDto.prototype, "email", void 0);
+class ForgotPasswordResponse {
+}
+exports.ForgotPasswordResponse = ForgotPasswordResponse;
+__decorate([
+    (0, swagger_1.ApiProperty)(),
+    __metadata("design:type", Boolean)
+], ForgotPasswordResponse.prototype, "ok", void 0);
+class ResetPasswordDto {
+}
+exports.ResetPasswordDto = ResetPasswordDto;
+__decorate([
+    (0, swagger_1.ApiProperty)(),
+    __metadata("design:type", String)
+], ResetPasswordDto.prototype, "email", void 0);
+__decorate([
+    (0, swagger_1.ApiProperty)({ description: 'Reset token obtained from forgot-password step' }),
+    __metadata("design:type", String)
+], ResetPasswordDto.prototype, "token", void 0);
+__decorate([
+    (0, swagger_1.ApiProperty)({ description: 'New password (min 6 chars)' }),
+    __metadata("design:type", String)
+], ResetPasswordDto.prototype, "newPassword", void 0);
+class OkResponse {
+}
+exports.OkResponse = OkResponse;
+__decorate([
+    (0, swagger_1.ApiProperty)(),
+    __metadata("design:type", Boolean)
+], OkResponse.prototype, "ok", void 0);
+class GoogleAuthDto {
+}
+exports.GoogleAuthDto = GoogleAuthDto;
+__decorate([
+    (0, swagger_1.ApiPropertyOptional)({ description: 'Google ID token from client (google_sign_in)' }),
+    __metadata("design:type", String)
+], GoogleAuthDto.prototype, "idToken", void 0);
+__decorate([
+    (0, swagger_1.ApiPropertyOptional)({ description: 'Google access token from client (fallback when idToken is not available)' }),
+    __metadata("design:type", String)
+], GoogleAuthDto.prototype, "accessToken", void 0);
+__decorate([
+    (0, swagger_1.ApiPropertyOptional)({ description: 'Optional display name override for first-time users' }),
+    __metadata("design:type", String)
+], GoogleAuthDto.prototype, "displayName", void 0);
 class AuthTokenResponse {
 }
 exports.AuthTokenResponse = AuthTokenResponse;

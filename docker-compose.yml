@@ -16,41 +16,94 @@ services:
     restart: unless-stopped
     depends_on:
       - mongo
+      - ai
+      - ai_montage
+    env_file:
+      - .env
     environment:
       PORT: "3000"
       MONGODB_URI: "mongodb://mongo:27017/scoutai"
       AI_SERVICE_URL: "${AI_SERVICE_URL:-http://ai:8001}"
+      MONTAGE_SERVICE_URL: "${MONTAGE_SERVICE_URL:-http://ai_montage:8002}"
       JWT_SECRET: "change_me"
       JWT_EXPIRES_IN: "7d"
       SWAGGER_ENABLED: "1"
       UPLOAD_DIR: "/data/uploads"
       CORS_ORIGINS: "*"
-      GOOGLE_CLIENT_ID: "66881653867-f6mskh181jvj0i77kh8akmfu5f8g6frm.apps.googleusercontent.com"
+      GOOGLE_CLIENT_ID: "${GOOGLE_CLIENT_ID:-}"
+      GOOGLE_CLIENT_SECRET: "${GOOGLE_CLIENT_SECRET:-}"
       SMTP_HOST: "${SMTP_HOST:-}"
       SMTP_PORT: "${SMTP_PORT:-587}"
       SMTP_USER: "${SMTP_USER:-}"
       SMTP_PASS: "${SMTP_PASS:-}"
       SMTP_FROM: "${SMTP_FROM:-}"
       APP_BASE_URL: "${APP_BASE_URL:-}"
+      STRIPE_SECRET_KEY: "${STRIPE_SECRET_KEY:-}"
+      STRIPE_PUBLISHABLE_KEY: "${STRIPE_PUBLISHABLE_KEY:-}"
+      ADMIN_BOOTSTRAP_TOKEN: "scoutai-admin-bootstrap-2024"
     ports:
       - "3000:3000"
     volumes:
       - uploads_data:/data/uploads
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  admin:
+    build:
+      context: ./admin
+      dockerfile: Dockerfile
+    container_name: scoutai-admin
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "3001:80"
 
   ai:
-    profiles:
-      - ai
     build:
       context: ./ai
       dockerfile: Dockerfile
     container_name: scoutai-ai
     restart: unless-stopped
     environment:
+      SCOUTAI_TRACKER: "deepsort"
+      SCOUTAI_DEEPSORT_EMBEDDER: "mobilenet"
+      SCOUTAI_DEEPSORT_MAX_COSINE: "0.35"
+      SCOUTAI_STRICT_TARGET_LOCK: "1"
+      SCOUTAI_ALLOW_PREDICTED_POINTS: "0"
+      SCOUTAI_ALLOW_GAP_INTERPOLATION: "0"
+      SCOUTAI_MIN_SAMPLING_FPS: "4"
+      SCOUTAI_MAX_LOCKED_NORM_SPEED: "0.55"
+      SCOUTAI_OUTPUT_MAX_GAP_S: "1.8"
+      SCOUTAI_OUTPUT_MAX_NORM_SPEED: "0.55"
+      SCOUTAI_SAME_ID_MAX_DIST_FACTOR: "2.6"
+      SCOUTAI_SAME_ID_MIN_HIST_SIM: "0.06"
+      SCOUTAI_STRICT_NO_REACQUIRE: "1"
+      SCOUTAI_MAX_IDENTITY_BREAK_FRAMES: "12"
+      SCOUTAI_SAFE_REACQUIRE: "1"
+      SCOUTAI_SAFE_REACQUIRE_MIN_HIST: "0.14"
+      SCOUTAI_SAFE_REACQUIRE_DIST_FACTOR: "1.6"
+      SCOUTAI_PRELOAD_MODEL: "0"
       SCOUTAI_YOLO_MODEL: "yolov8n.pt"
-      SCOUTAI_YOLO_IMG_SIZE: "640"
+      SCOUTAI_YOLO_CONF: "0.08"
+      SCOUTAI_YOLO_IMG_SIZE: "416"
+      SCOUTAI_MAX_DET: "30"
       SCOUTAI_AUTO_CALIBRATION: "1"
     ports:
       - "8001:8001"
+
+  ai_montage:
+    build:
+      context: ./ai_montage
+      dockerfile: Dockerfile
+    container_name: scoutai-ai-montage
+    restart: unless-stopped
+    environment:
+      MONTAGE_ALLOWED_ORIGINS: "*"
+    volumes:
+      - uploads_data:/data/uploads
+    ports:
+      - "8002:8002"
 
 volumes:
   mongo_data:

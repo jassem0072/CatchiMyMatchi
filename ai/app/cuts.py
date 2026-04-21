@@ -11,7 +11,7 @@ def frame_histogram(frame_bgr: np.ndarray) -> np.ndarray:
     return hist.flatten()
 
 
-def is_cut(prev_hist: np.ndarray | None, curr_hist: np.ndarray, threshold: float = 0.65) -> bool:
+def is_cut(prev_hist: np.ndarray | None, curr_hist: np.ndarray, threshold: float = 0.85) -> bool:
     if prev_hist is None:
         return False
     dist = cv2.compareHist(prev_hist.astype(np.float32), curr_hist.astype(np.float32), cv2.HISTCMP_BHATTACHARYYA)

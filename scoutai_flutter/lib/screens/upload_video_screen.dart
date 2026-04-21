@@ -10,6 +10,7 @@ import '../app/scoutai_app.dart';
 import '../services/api_config.dart';
 import '../services/auth_storage.dart';
 import '../theme/app_colors.dart';
+import '../services/translations.dart';
 import '../widgets/common.dart';
 
 class UploadVideoScreen extends StatefulWidget {
@@ -75,7 +76,7 @@ class _UploadVideoScreenState extends State<UploadVideoScreen> {
       setState(() {
         _picked = null;
         _pickedBytes = null;
-        _error = 'Unsupported video type. Please use MP4/MOV/WebM.';
+        _error = S.current.unsupportedVideo;
       });
       return;
     }
@@ -164,7 +165,7 @@ class _UploadVideoScreenState extends State<UploadVideoScreen> {
       setState(() {
         _busy = false;
         _uploaded = data;
-        _info = 'Upload complete. You can continue to analysis.';
+        _info = S.current.encryptedTransfer;
       });
     } catch (e) {
       if (!mounted) return;
@@ -177,11 +178,12 @@ class _UploadVideoScreenState extends State<UploadVideoScreen> {
 
   void _continue() {
     final id = _uploaded?['_id'];
-    Navigator.of(context).pushNamed(AppRoutes.identifyPlayer, arguments: id);
+    Navigator.of(context).pushNamed(AppRoutes.tagTeammates, arguments: id);
   }
 
   @override
   Widget build(BuildContext context) {
+    final s = S.of(context);
     final picked = _picked;
     final uploaded = _uploaded;
     final canUpload = !_busy;
@@ -189,7 +191,7 @@ class _UploadVideoScreenState extends State<UploadVideoScreen> {
 
     return GradientScaffold(
       appBar: AppBar(
-        title: const Text('Upload Match Video'),
+        title: Text(s.uploadMatchVideo),
         leading: IconButton(
           icon: const Icon(Icons.arrow_back),
           onPressed: () => Navigator.of(context).pop(),
@@ -199,14 +201,14 @@ class _UploadVideoScreenState extends State<UploadVideoScreen> {
         padding: const EdgeInsets.fromLTRB(18, 8, 18, 28),
         children: [
           const SizedBox(height: 10),
-          const Text(
-            'New Match Analysis',
-            style: TextStyle(fontWeight: FontWeight.w900, fontSize: 26),
+          Text(
+            s.newMatchAnalysis,
+            style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 26),
           ),
           const SizedBox(height: 8),
-          const Text(
-            'Upload a high-quality MP4 or MOV file for the best\nAI tracking results.',
-            style: TextStyle(color: AppColors.textMuted, fontWeight: FontWeight.w600),
+          Text(
+            s.uploadInstructions,
+            style: TextStyle(color: AppColors.txMuted(context), fontWeight: FontWeight.w600),
           ),
           const SizedBox(height: 18),
           Container(
@@ -232,35 +234,35 @@ class _UploadVideoScreenState extends State<UploadVideoScreen> {
                   child: const Icon(Icons.cloud_upload_outlined, color: AppColors.primary, size: 30),
                 ),
                 const SizedBox(height: 14),
-                const Text(
-                  'Select Match Video',
-                  style: TextStyle(fontWeight: FontWeight.w900, fontSize: 18),
+                Text(
+                  s.selectMatchVideo,
+                  style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 18),
                 ),
                 const SizedBox(height: 8),
-                const Text(
-                  'Tap here to upload MP4 or MOV files\nfrom your gallery (Max 2GB)',
+                Text(
+                  s.tapToUpload,
                   textAlign: TextAlign.center,
-                  style: TextStyle(color: AppColors.textMuted, fontWeight: FontWeight.w600),
+                  style: TextStyle(color: AppColors.txMuted(context), fontWeight: FontWeight.w600),
                 ),
                 const SizedBox(height: 14),
                 FilledButton(
                   onPressed: canUpload ? _pickVideo : null,
-                  child: const Text('Browse Files'),
+                  child: Text(s.browseFiles),
                 ),
                 const SizedBox(height: 10),
                 OutlinedButton(
                   onPressed: (!canUpload || picked == null) ? null : _upload,
                   child: _busy
                       ? const SizedBox(height: 18, width: 18, child: CircularProgressIndicator(strokeWidth: 2))
-                      : const Text('Upload'),
+                      : Text(s.upload),
                 ),
               ],
             ),
           ),
           const SizedBox(height: 22),
-          const Text(
-            'Current Upload',
-            style: TextStyle(fontWeight: FontWeight.w900, fontSize: 18),
+          Text(
+            s.currentUpload,
+            style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 18),
           ),
           const SizedBox(height: 10),
           GlassCard(
@@ -285,13 +287,13 @@ class _UploadVideoScreenState extends State<UploadVideoScreen> {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
-                            picked?.name ?? 'No file selected',
+                            picked?.name ?? s.noFileSelected,
                             style: const TextStyle(fontWeight: FontWeight.w900),
                           ),
                           SizedBox(height: 4),
                           Text(
                             picked == null
-                                ? 'Choose a video to upload'
+                                ? s.chooseVideo
                                 : '${((picked.size) / (1024 * 1024)).toStringAsFixed(1)} MB',
                             style: const TextStyle(color: AppColors.textMuted),
                           ),
@@ -330,10 +332,10 @@ class _UploadVideoScreenState extends State<UploadVideoScreen> {
                   children: [
                     Text(
                       uploaded != null
-                          ? 'Uploaded successfully'
+                          ? s.uploadedSuccessfully
                           : _busy
-                              ? 'Uploading video...'
-                              : 'Ready',
+                              ? s.uploadingVideo
+                              : s.ready,
                       style: const TextStyle(color: AppColors.textMuted),
                     ),
                     Text(
@@ -358,9 +360,9 @@ class _UploadVideoScreenState extends State<UploadVideoScreen> {
                     style: const TextStyle(color: AppColors.success, fontWeight: FontWeight.w700),
                   )
                 else
-                  const Text(
-                    'Encrypted transfer active',
-                    style: TextStyle(color: AppColors.textMuted),
+                  Text(
+                    s.encryptedTransfer,
+                    style: const TextStyle(color: AppColors.textMuted),
                   ),
               ],
             ),
@@ -368,13 +370,13 @@ class _UploadVideoScreenState extends State<UploadVideoScreen> {
           const SizedBox(height: 18),
           FilledButton(
             onPressed: canContinue ? _continue : null,
-            child: const Text('Continue to Analysis'),
+            child: Text(s.continueToAnalysis),
           ),
           const SizedBox(height: 12),
-          const Text(
-            'Button will activate once upload is 100% complete',
+          Text(
+            s.buttonActivateWhenDone,
             textAlign: TextAlign.center,
-            style: TextStyle(color: AppColors.textMuted),
+            style: TextStyle(color: AppColors.txMuted(context)),
           ),
         ],
       ),

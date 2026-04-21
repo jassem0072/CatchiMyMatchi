@@ -7,7 +7,7 @@ import type { RequestUser } from './request-user';
 export type JwtPayload = {
   sub: string;
   email: string;
-  role: 'player' | 'scouter';
+  role: 'player' | 'scouter' | 'admin';
 };
 
 @Injectable()

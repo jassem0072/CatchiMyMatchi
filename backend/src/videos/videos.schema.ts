@@ -28,6 +28,34 @@ export class Video {
 
   @Prop()
   lastAnalysisAt?: Date;
+
+  /** Per-player analysis results keyed by playerId (for tagged players) */
+  @Prop({ type: Object, default: {} })
+  playerAnalyses?: Record<string, Record<string, unknown>>;
+
+  /** IDs of teammates tagged in this video */
+  @Prop({ type: [String], default: [] })
+  taggedPlayers!: string[];
+
+  /** IDs of teams tagged in this video */
+  @Prop({ type: [String], default: [] })
+  taggedTeams!: string[];
+
+  /** 'public' = visible to scouts, 'private' = only owner & tagged players */
+  @Prop({ default: 'public', enum: ['public', 'private'] })
+  visibility!: string;
+
+  /** Montage highlight reel filename (stored in uploads dir) */
+  @Prop({ type: String, default: null })
+  montageFilename?: string | null;
+
+  /** Relative path to the montage file */
+  @Prop({ type: String, default: null })
+  montageRelativePath?: string | null;
+
+  /** When the montage was generated */
+  @Prop()
+  montageGeneratedAt?: Date;
 }
 
 export const VideoSchema = SchemaFactory.createForClass(Video);

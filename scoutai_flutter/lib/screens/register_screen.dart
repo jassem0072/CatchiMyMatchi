@@ -2,9 +2,10 @@ import 'package:flutter/material.dart';
 
 import '../app/scoutai_app.dart';
 import '../services/auth_api.dart';
-import '../services/auth_storage.dart';
+import '../services/translations.dart';
 import '../theme/app_colors.dart';
 import '../widgets/common.dart';
+import '../widgets/country_picker.dart';
 
 class RegisterScreen extends StatefulWidget {
   const RegisterScreen({super.key});
@@ -19,12 +20,20 @@ class _RegisterScreenState extends State<RegisterScreen> {
   final _emailCtrl = TextEditingController();
   final _passwordCtrl = TextEditingController();
   final _confirmPasswordCtrl = TextEditingController();
-  final _positionCtrl = TextEditingController();
-  final _nationCtrl = TextEditingController();
 
-  String? _role;
+  bool _prefilledFromArgs = false;
+
+  String? _selectedPosition;
+  String? _selectedNation;
+
   bool _busy = false;
   String? _error;
+
+  static const _positions = [
+    'GK', 'CB', 'LB', 'RB', 'LWB', 'RWB', 'SW',
+    'CDM', 'CM', 'CAM', 'LM', 'RM',
+    'LW', 'RW', 'CF', 'ST',
+  ];
 
   @override
   void dispose() {
@@ -32,9 +41,18 @@ class _RegisterScreenState extends State<RegisterScreen> {
     _emailCtrl.dispose();
     _passwordCtrl.dispose();
     _confirmPasswordCtrl.dispose();
-    _positionCtrl.dispose();
-    _nationCtrl.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_prefilledFromArgs) return;
+    final args = ModalRoute.of(context)?.settings.arguments;
+    if (args is String && args.trim().isNotEmpty) {
+      _emailCtrl.text = args.trim();
+      _prefilledFromArgs = true;
+    }
   }
 
   Future<void> _submit() async {
@@ -44,45 +62,55 @@ class _RegisterScreenState extends State<RegisterScreen> {
     final email = _emailCtrl.text.trim();
     final password = _passwordCtrl.text;
     final confirm = _confirmPasswordCtrl.text;
-    final role = _role;
 
-    if (role == null) {
-      setState(() => _error = 'Select a role (player or scouter)');
-      return;
-    }
     if (displayName.isEmpty) {
-      setState(() => _error = 'Enter your name');
+      setState(() => _error = S.current.enterName);
       return;
     }
     if (email.isEmpty) {
-      setState(() => _error = 'Enter your email');
+      setState(() => _error = S.current.enterEmail);
       return;
     }
     if (password.isEmpty || password.length < 6) {
-      setState(() => _error = 'Password must be at least 6 characters');
+      setState(() => _error = S.current.passwordMinChars);
       return;
     }
     if (password != confirm) {
-      setState(() => _error = 'Passwords do not match');
+      setState(() => _error = S.current.passwordsNoMatch);
       return;
     }
 
     setState(() => _busy = true);
     try {
-      final token = await AuthApi().signup(
+      final verifiedEmail = await AuthApi().signup(
         email: email,
         password: password,
-        role: role,
+        role: 'player',
         displayName: displayName,
-        position: role == 'player' ? _positionCtrl.text : null,
-        nation: role == 'player' ? _nationCtrl.text : null,
+        position: _selectedPosition ?? '',
+        nation: _selectedNation ?? '',
       );
-      await AuthStorage.saveToken(token);
       if (!mounted) return;
-      Navigator.of(context).pushReplacementNamed(AppRoutes.dashboard);
+      // Navigate to 6-digit code verification screen
+      Navigator.of(context).pushReplacementNamed(
+        AppRoutes.verifyCode,
+        arguments: verifiedEmail,
+      );
     } catch (e) {
       if (!mounted) return;
-      setState(() => _error = e.toString().replaceFirst('Exception: ', ''));
+      final msg = e.toString().replaceFirst('Exception: ', '');
+      final low = msg.toLowerCase();
+      if (low.contains('email already in use') || low.contains('already in use')) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Email already in use. Please log in.')),
+        );
+        Navigator.of(context).pushReplacementNamed(
+          AppRoutes.login,
+          arguments: email,
+        );
+        return;
+      }
+      setState(() => _error = msg);
     } finally {
       if (!mounted) return;
       setState(() => _busy = false);
@@ -91,9 +119,10 @@ class _RegisterScreenState extends State<RegisterScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final s = S.of(context);
     return GradientScaffold(
       appBar: AppBar(
-        title: const Text('Create Account'),
+        title: Text(s.createAccount),
         leading: IconButton(
           icon: const Icon(Icons.arrow_back),
           onPressed: () => Navigator.of(context).pop(),
@@ -107,50 +136,35 @@ class _RegisterScreenState extends State<RegisterScreen> {
             const SizedBox(height: 10),
             const Center(child: AppLogo(size: 66)),
             const SizedBox(height: 18),
-            const Text(
-              'Join the Academy',
+            Text(
+              s.joinAcademy,
               textAlign: TextAlign.center,
-              style: TextStyle(fontWeight: FontWeight.w900, fontSize: 34),
+              style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 34),
             ),
             const SizedBox(height: 10),
             RichText(
               textAlign: TextAlign.center,
-              text: const TextSpan(
+              text: TextSpan(
                 style: TextStyle(
-                  color: AppColors.textMuted,
+                  color: AppColors.txMuted(context),
                   fontWeight: FontWeight.w600,
                   fontSize: 15,
                 ),
                 children: [
-                  TextSpan(text: 'Start analyzing matches with '),
+                  TextSpan(text: s.startAnalyzing),
                   TextSpan(
-                    text: 'AI\nperformance',
-                    style: TextStyle(
+                    text: s.aiPerformance,
+                    style: const TextStyle(
                       color: AppColors.accent,
                       fontWeight: FontWeight.w800,
                     ),
                   ),
-                  TextSpan(text: ' tracking.'),
+                  TextSpan(text: s.trackingDot),
                 ],
               ),
             ),
             const SizedBox(height: 28),
-            const Text('Role', style: TextStyle(color: AppColors.textMuted)),
-            const SizedBox(height: 10),
-            DropdownButtonFormField<String>(
-              value: _role,
-              items: const [
-                DropdownMenuItem(value: 'player', child: Text('Player')),
-                DropdownMenuItem(value: 'scouter', child: Text('Scouter')),
-              ],
-              onChanged: _busy ? null : (v) => setState(() => _role = v),
-              decoration: const InputDecoration(
-                prefixIcon: Icon(Icons.badge_outlined),
-                hintText: 'Choose your role',
-              ),
-            ),
-            const SizedBox(height: 18),
-            const Text('Full Name', style: TextStyle(color: AppColors.textMuted)),
+            Text(s.fullName, style: TextStyle(color: AppColors.txMuted(context))),
             const SizedBox(height: 10),
             TextField(
               controller: _displayNameCtrl,
@@ -159,32 +173,52 @@ class _RegisterScreenState extends State<RegisterScreen> {
                 prefixIcon: Icon(Icons.person_outline),
               ),
             ),
-            if (_role == 'player') ...[
-              const SizedBox(height: 18),
-              const Text('Position (player)', style: TextStyle(color: AppColors.textMuted)),
-              const SizedBox(height: 10),
-              TextField(
-                controller: _positionCtrl,
-                decoration: const InputDecoration(
-                  hintText: 'ST',
-                  prefixIcon: Icon(Icons.sports_soccer_outlined),
-                ),
-              ),
-              const SizedBox(height: 18),
-              const Text('Nation (player)', style: TextStyle(color: AppColors.textMuted)),
-              const SizedBox(height: 10),
-              TextField(
-                controller: _nationCtrl,
-                decoration: const InputDecoration(
-                  hintText: 'TN',
-                  prefixIcon: Icon(Icons.flag_outlined),
-                ),
-              ),
-            ],
             const SizedBox(height: 18),
-            const Text(
-              'Email Address',
-              style: TextStyle(color: AppColors.textMuted),
+            Text(s.position, style: TextStyle(color: AppColors.txMuted(context))),
+            const SizedBox(height: 10),
+            DropdownButtonFormField<String>(
+              value: _selectedPosition,
+              isExpanded: true,
+              decoration: const InputDecoration(
+                prefixIcon: Icon(Icons.sports_soccer_outlined),
+                hintText: 'Select position',
+              ),
+              items: _positions.map((p) => DropdownMenuItem(
+                value: p,
+                child: Text(p),
+              )).toList(),
+              onChanged: (v) => setState(() => _selectedPosition = v),
+            ),
+            const SizedBox(height: 18),
+            Text(s.nation, style: TextStyle(color: AppColors.txMuted(context))),
+            const SizedBox(height: 10),
+            GestureDetector(
+              onTap: () async {
+                final picked = await showCountryPicker(context, current: _selectedNation);
+                if (picked != null && mounted) setState(() => _selectedNation = picked);
+              },
+              child: InputDecorator(
+                decoration: const InputDecoration(
+                  prefixIcon: Icon(Icons.flag_outlined),
+                  hintText: 'Select country',
+                  suffixIcon: Icon(Icons.arrow_drop_down),
+                ),
+                child: _selectedNation != null
+                    ? Row(
+                        children: [
+                          if (flagForCountry(_selectedNation!).isNotEmpty)
+                            Text(flagForCountry(_selectedNation!), style: const TextStyle(fontSize: 20)),
+                          const SizedBox(width: 8),
+                          Expanded(child: Text(_selectedNation!, overflow: TextOverflow.ellipsis)),
+                        ],
+                      )
+                    : null,
+              ),
+            ),
+            const SizedBox(height: 18),
+            Text(
+              s.emailAddress,
+              style: TextStyle(color: AppColors.txMuted(context)),
             ),
             const SizedBox(height: 10),
             TextField(
@@ -196,13 +230,13 @@ class _RegisterScreenState extends State<RegisterScreen> {
               ),
             ),
             const SizedBox(height: 18),
-            const Text('Password', style: TextStyle(color: AppColors.textMuted)),
+            Text(s.password, style: TextStyle(color: AppColors.txMuted(context))),
             const SizedBox(height: 10),
             TextField(
               controller: _passwordCtrl,
               obscureText: _obscure,
               decoration: InputDecoration(
-                hintText: 'Min. 6 characters',
+                hintText: s.minChars,
                 prefixIcon: const Icon(Icons.lock_outline),
                 suffixIcon: IconButton(
                   onPressed: () => setState(() => _obscure = !_obscure),
@@ -211,16 +245,16 @@ class _RegisterScreenState extends State<RegisterScreen> {
               ),
             ),
             const SizedBox(height: 18),
-            const Text(
-              'Confirm Password',
-              style: TextStyle(color: AppColors.textMuted),
+            Text(
+              s.confirmPassword,
+              style: TextStyle(color: AppColors.txMuted(context)),
             ),
             const SizedBox(height: 10),
             TextField(
               controller: _confirmPasswordCtrl,
               obscureText: true,
-              decoration: const InputDecoration(
-                hintText: 'Repeat password',
+              decoration: InputDecoration(
+                hintText: s.repeatPassword,
                 prefixIcon: Icon(Icons.verified_user_outlined),
               ),
             ),
@@ -246,7 +280,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
                     ),
                     const SizedBox(width: 10),
                   ],
-                  const Text('Create Account'),
+                  Text(s.createAccount),
                   const SizedBox(width: 10),
                   const Icon(Icons.arrow_forward, size: 18),
                 ],
@@ -265,8 +299,8 @@ class _RegisterScreenState extends State<RegisterScreen> {
                     Navigator.of(context)
                         .pushNamedAndRemoveUntil(AppRoutes.login, (_) => false);
                   },
-                  child: const Text(
-                    'Log In',
+                  child: Text(
+                    s.logIn,
                     style: TextStyle(
                       color: AppColors.accent,
                       fontWeight: FontWeight.w900,

@@ -25,18 +25,38 @@ let AuthController = class AuthController {
         this.users = users;
     }
     async register(dto) {
-        const role = dto.role || 'player';
         return this.auth.register({
             email: dto.email,
             password: dto.password,
-            role,
+            role: 'player',
             displayName: dto.displayName,
             position: dto.position,
             nation: dto.nation,
         });
     }
+    async signup(dto) {
+        return this.register(dto);
+    }
     async login(dto) {
         return this.auth.login(dto.email, dto.password);
+    }
+    async signin(dto) {
+        return this.login(dto);
+    }
+    async google(dto) {
+        return this.auth.loginWithGoogle({
+            idToken: dto.idToken,
+            accessToken: dto.accessToken,
+            role: 'player',
+            displayName: dto.displayName,
+        });
+    }
+    async forgotPassword(dto) {
+        return this.auth.requestPasswordReset(dto.email);
+    }
+    async resetPassword(dto) {
+        await this.auth.resetPassword(dto.email, dto.token, dto.newPassword);
+        return { ok: true };
     }
     async me(req) {
         const u = req.user;
@@ -56,12 +76,47 @@ __decorate([
     __metadata("design:returntype", Promise)
 ], AuthController.prototype, "register", null);
 __decorate([
+    (0, common_1.Post)('signup'),
+    __param(0, (0, common_1.Body)()),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [auth_dto_1.RegisterDto]),
+    __metadata("design:returntype", Promise)
+], AuthController.prototype, "signup", null);
+__decorate([
     (0, common_1.Post)('login'),
     __param(0, (0, common_1.Body)()),
     __metadata("design:type", Function),
     __metadata("design:paramtypes", [auth_dto_1.LoginDto]),
     __metadata("design:returntype", Promise)
 ], AuthController.prototype, "login", null);
+__decorate([
+    (0, common_1.Post)('signin'),
+    __param(0, (0, common_1.Body)()),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [auth_dto_1.LoginDto]),
+    __metadata("design:returntype", Promise)
+], AuthController.prototype, "signin", null);
+__decorate([
+    (0, common_1.Post)('google'),
+    __param(0, (0, common_1.Body)()),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [auth_dto_1.GoogleAuthDto]),
+    __metadata("design:returntype", Promise)
+], AuthController.prototype, "google", null);
+__decorate([
+    (0, common_1.Post)('forgot-password'),
+    __param(0, (0, common_1.Body)()),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [auth_dto_1.ForgotPasswordDto]),
+    __metadata("design:returntype", Promise)
+], AuthController.prototype, "forgotPassword", null);
+__decorate([
+    (0, common_1.Post)('reset-password'),
+    __param(0, (0, common_1.Body)()),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [auth_dto_1.ResetPasswordDto]),
+    __metadata("design:returntype", Promise)
+], AuthController.prototype, "resetPassword", null);
 __decorate([
     (0, common_1.Get)('me'),
     (0, swagger_1.ApiBearerAuth)(),

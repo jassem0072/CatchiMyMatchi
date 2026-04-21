@@ -52,6 +52,10 @@ const node_crypto_1 = require("node:crypto");
 const common_1 = require("@nestjs/common");
 const platform_express_1 = require("@nestjs/platform-express");
 const multer_1 = require("multer");
+const swagger_1 = require("@nestjs/swagger");
+const jwt_auth_guard_1 = require("../auth/jwt-auth.guard");
+const roles_decorator_1 = require("../auth/roles.decorator");
+const roles_guard_1 = require("../auth/roles.guard");
 const videos_service_1 = require("./videos.service");
 function uploadsRoot() {
     const uploadDir = process.env.UPLOAD_DIR || 'uploads';
@@ -70,7 +74,13 @@ let VideosController = class VideosController {
     async get(id) {
         return this.videosService.getById(id);
     }
-    async analyze(id, body) {
+    async analyze(id, body, req) {
+        const user = req.user;
+        if (user.role === 'player') {
+            const v = await this.videosService.getById(id);
+            if (!v.ownerId || v.ownerId !== user.sub)
+                throw new common_1.ForbiddenException('Not allowed to analyze this video');
+        }
         return this.videosService.analyzeVideo(id, body);
     }
     async stream(id, req, res) {
@@ -143,10 +153,14 @@ __decorate([
 ], VideosController.prototype, "get", null);
 __decorate([
     (0, common_1.Post)(':id/analyze'),
+    (0, swagger_1.ApiBearerAuth)(),
+    (0, common_1.UseGuards)(jwt_auth_guard_1.JwtAuthGuard, roles_guard_1.RolesGuard),
+    (0, roles_decorator_1.Roles)('scouter', 'player'),
     __param(0, (0, common_1.Param)('id')),
     __param(1, (0, common_1.Body)()),
+    __param(2, (0, common_1.Req)()),
     __metadata("design:type", Function),
-    __metadata("design:paramtypes", [String, Object]),
+    __metadata("design:paramtypes", [String, Object, Object]),
     __metadata("design:returntype", Promise)
 ], VideosController.prototype, "analyze", null);
 __decorate([
@@ -159,6 +173,7 @@ __decorate([
     __metadata("design:returntype", Promise)
 ], VideosController.prototype, "stream", null);
 exports.VideosController = VideosController = __decorate([
+    (0, swagger_1.ApiTags)('videos'),
     (0, common_1.Controller)('videos'),
     __metadata("design:paramtypes", [videos_service_1.VideosService])
 ], VideosController);

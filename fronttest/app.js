@@ -810,11 +810,11 @@ async function analyzeSelection() {
   try {
     const { me, token } = loadAuth();
     if (!token || !me) {
-      resultEl.textContent = 'Sign in as a scouter to run analysis.';
+      resultEl.textContent = 'Sign in to run analysis.';
       return;
     }
-    if (me.role !== 'scouter') {
-      resultEl.textContent = 'Only scouters can run AI analysis.';
+    if (me.role !== 'scouter' && me.role !== 'player') {
+      resultEl.textContent = 'Only players or scouters can run AI analysis.';
       return;
     }
 
@@ -923,7 +923,11 @@ async function analyzeSelection() {
     renderPlayerCard();
   } catch (e) {
     console.error(e);
-    resultEl.textContent = `Error: ${e.message}`;
+    const msg = e && e.message ? e.message : String(e);
+    const hint = /ECONNREFUSED|connect/i.test(msg)
+      ? '\nTip: start the AI service (docker compose --profile ai up -d) or run the AI on http://127.0.0.1:8001.'
+      : '';
+    resultEl.textContent = `Error: ${msg}${hint}`;
   } finally {
     setAnalyzeEnabled(true);
   }

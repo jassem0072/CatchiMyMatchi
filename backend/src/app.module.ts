@@ -3,12 +3,16 @@ import { MongooseModule } from '@nestjs/mongoose';
 
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
+import { AdminModule } from './admin/admin.module';
 import { AuthModule } from './auth/auth.module';
+import { ChallengesModule } from './challenges/challenges.module';
 import { FavoritesModule } from './favorites/favorites.module';
 import { MeModule } from './me/me.module';
+import { NotificationsModule } from './notifications/notifications.module';
 import { PlayersModule } from './players/players.module';
 import { ReportsModule } from './reports/reports.module';
 import { UsersModule } from './users/users.module';
+import { TeamsModule } from './teams/teams.module';
 import { VideosModule } from './videos/videos.module';
 
 @Module({
@@ -21,6 +25,10 @@ import { VideosModule } from './videos/videos.module';
     FavoritesModule,
     PlayersModule,
     ReportsModule,
+    ChallengesModule,
+    NotificationsModule,
+    TeamsModule,
+    AdminModule,
   ],
   controllers: [AppController],
   providers: [AppService],

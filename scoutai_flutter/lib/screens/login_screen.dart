@@ -1,10 +1,12 @@
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
-import 'package:flutter/foundation.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 
 import '../app/scoutai_app.dart';
 import '../services/auth_api.dart';
 import '../services/auth_storage.dart';
+import '../services/jwt_utils.dart';
+import '../services/translations.dart';
 import '../theme/app_colors.dart';
 import '../widgets/common.dart';
 
@@ -23,43 +25,31 @@ class _LoginScreenState extends State<LoginScreen> {
   String? _error;
   bool _rememberMe = false;
 
+  bool _prefilledFromArgs = false;
+
   @override
   void initState() {
     super.initState();
     _tryAutoLogin();
   }
 
-  Future<String?> _pickRole() async {
-    return showDialog<String>(
-      context: context,
-      barrierDismissible: true,
-      builder: (context) {
-        return AlertDialog(
-          title: const Text('Choose your role'),
-          content: const Text('Select how you want to use ScoutAI.'),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop('player'),
-              child: const Text('Player'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.of(context).pop('scouter'),
-              child: const Text('Scouter'),
-            ),
-          ],
-        );
-      },
-    );
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_prefilledFromArgs) return;
+    final args = ModalRoute.of(context)?.settings.arguments;
+    if (args is String && args.trim().isNotEmpty) {
+      _emailCtrl.text = args.trim();
+      _prefilledFromArgs = true;
+    }
   }
 
   Future<void> _googleSignIn() async {
     setState(() => _error = null);
     setState(() => _busy = true);
     try {
-      const webClientId = String.fromEnvironment('GOOGLE_WEB_CLIENT_ID');
       final google = GoogleSignIn(
-        scopes: const ['openid', 'email', 'profile'],
-        clientId: kIsWeb && webClientId.isNotEmpty ? webClientId : null,
+        scopes: const ['email'],
       );
 
       // Force account chooser.
@@ -73,29 +63,57 @@ class _LoginScreenState extends State<LoginScreen> {
         setState(() => _busy = false);
         return;
       }
-      final auth = await account.authentication;
-      final idToken = auth.idToken;
-      final accessToken = auth.accessToken;
-      if ((idToken == null || idToken.isEmpty) && (accessToken == null || accessToken.isEmpty)) {
-        throw Exception('Missing Google token');
+
+      String? idToken;
+      String? accessToken;
+      String? googleEmail;
+      String? googleDisplayName;
+
+      if (kIsWeb) {
+        // On web, google_sign_in_web v0.12+ uses GIS. Calling account.authentication
+        // triggers the OAuth2 Code Client popup which causes redirect_uri_mismatch.
+        // Instead, use the verified account info from signIn() directly.
+        googleEmail = account.email;
+        googleDisplayName = account.displayName ?? '';
+      } else {
+        final auth = await account.authentication;
+        idToken = auth.idToken;
+        accessToken = auth.accessToken;
       }
 
       String token;
-      try {
-        token = await AuthApi().google(idToken: idToken, accessToken: accessToken);
-      } catch (e) {
-        final msg = e.toString().toLowerCase();
-        if (msg.contains('role is required')) {
-          final role = await _pickRole();
-          if (role == null) throw Exception('Role selection cancelled');
-          token = await AuthApi().google(idToken: idToken, accessToken: accessToken, role: role);
-        } else {
-          rethrow;
+      if (kIsWeb && googleEmail != null && googleEmail.isNotEmpty) {
+        // Web flow: use Google-verified email from GIS sign-in
+        try {
+          token = await AuthApi().googleWeb(email: googleEmail, displayName: googleDisplayName ?? '');
+        } catch (e) {
+          final msg = e.toString().toLowerCase();
+          if (msg.contains('role is required')) {
+            token = await AuthApi().googleWeb(email: googleEmail, displayName: googleDisplayName ?? '', role: 'player');
+          } else {
+            rethrow;
+          }
+        }
+      } else {
+        if ((idToken == null || idToken.isEmpty) && (accessToken == null || accessToken.isEmpty)) {
+          throw Exception('Missing Google token');
+        }
+        try {
+          token = await AuthApi().google(idToken: idToken, accessToken: accessToken);
+        } catch (e) {
+          final msg = e.toString().toLowerCase();
+          if (msg.contains('role is required')) {
+            token = await AuthApi().google(idToken: idToken, accessToken: accessToken, role: 'player');
+          } else {
+            rethrow;
+          }
         }
       }
       await AuthStorage.saveToken(token, remember: _rememberMe);
       if (!mounted) return;
-      Navigator.of(context).pushReplacementNamed(AppRoutes.dashboard);
+      final googleHome = await _homeForToken(token);
+      if (!mounted) return;
+      Navigator.of(context).pushReplacementNamed(googleHome);
     } catch (e) {
       if (!mounted) return;
       setState(() => _error = e.toString().replaceFirst('Exception: ', ''));
@@ -112,6 +130,18 @@ class _LoginScreenState extends State<LoginScreen> {
     super.dispose();
   }
 
+  Future<String> _homeForToken(String token) async {
+    final role = roleFromToken(token);
+    if (role == 'scouter') {
+      try {
+        final me = await AuthApi().me(token);
+        if (me['badgeVerified'] != true) return AppRoutes.profile;
+      } catch (_) {}
+      return AppRoutes.scouterHome;
+    }
+    return AppRoutes.playerHome;
+  }
+
   Future<void> _tryAutoLogin() async {
     final token = await AuthStorage.loadToken();
     if (!mounted) return;
@@ -119,9 +149,11 @@ class _LoginScreenState extends State<LoginScreen> {
     try {
       await AuthApi().me(token);
       if (!mounted) return;
+      final home = await _homeForToken(token);
+      if (!mounted) return;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
-        Navigator.of(context).pushReplacementNamed(AppRoutes.dashboard);
+        Navigator.of(context).pushReplacementNamed(home);
       });
     } catch (_) {
       await AuthStorage.clear();
@@ -135,7 +167,7 @@ class _LoginScreenState extends State<LoginScreen> {
     setState(() => _error = null);
 
     if (email.isEmpty || password.isEmpty) {
-      setState(() => _error = 'Enter email and password');
+      setState(() => _error = S.current.enterEmailPassword);
       return;
     }
 
@@ -144,10 +176,28 @@ class _LoginScreenState extends State<LoginScreen> {
       final token = await AuthApi().signin(email: email, password: password);
       await AuthStorage.saveToken(token, remember: _rememberMe);
       if (!mounted) return;
-      Navigator.of(context).pushReplacementNamed(AppRoutes.dashboard);
+      final home = await _homeForToken(token);
+      if (!mounted) return;
+      Navigator.of(context).pushReplacementNamed(home);
     } catch (e) {
       if (!mounted) return;
-      setState(() => _error = e.toString().replaceFirst('Exception: ', ''));
+      final msg = e.toString().replaceFirst('Exception: ', '');
+      // If email not verified, redirect to verification screen
+      final low = msg.toLowerCase();
+      if (low.contains('verify your email') ||
+          low.contains('email not verified') ||
+          (low.contains('not verified') && low.contains('email')) ||
+          low.contains('6-digit')) {
+        Navigator.of(context).pushReplacementNamed(
+          AppRoutes.verifyCode,
+          arguments: {
+            'email': email,
+            'codeSent': true,
+          },
+        );
+        return;
+      }
+      setState(() => _error = msg);
     } finally {
       if (!mounted) return;
       setState(() => _busy = false);
@@ -156,6 +206,7 @@ class _LoginScreenState extends State<LoginScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final s = S.of(context);
     return GradientScaffold(
       extendBodyBehindAppBar: true,
       body: SingleChildScrollView(
@@ -173,25 +224,25 @@ class _LoginScreenState extends State<LoginScreen> {
               ),
             ),
             const SizedBox(height: 6),
-            const Center(
+            Center(
               child: Text(
-                'Professional Match Analysis Platform',
+                s.platformSubtitle,
                 style: TextStyle(
-                  color: AppColors.textMuted,
+                  color: AppColors.txMuted(context),
                   fontWeight: FontWeight.w600,
                 ),
               ),
             ),
             const SizedBox(height: 34),
-            const Text(
-              'Welcome Back, Scout',
-              style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900),
+            Text(
+              s.welcomeBackScout,
+              style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w900),
             ),
             const SizedBox(height: 18),
-            const Text(
-              'EMAIL ADDRESS',
+            Text(
+              s.emailAddress,
               style: TextStyle(
-                color: AppColors.textMuted,
+                color: AppColors.txMuted(context),
                 fontWeight: FontWeight.w800,
                 letterSpacing: 1.2,
                 fontSize: 12,
@@ -208,10 +259,10 @@ class _LoginScreenState extends State<LoginScreen> {
               ),
             ),
             const SizedBox(height: 18),
-            const Text(
-              'SECURE PASSWORD',
+            Text(
+              s.securePassword,
               style: TextStyle(
-                color: AppColors.textMuted,
+                color: AppColors.txMuted(context),
                 fontWeight: FontWeight.w800,
                 letterSpacing: 1.2,
                 fontSize: 12,
@@ -250,20 +301,26 @@ class _LoginScreenState extends State<LoginScreen> {
                           setState(() => _rememberMe = v ?? false);
                         },
                 ),
-                const Text(
-                  'Remember me',
-                  style: TextStyle(color: AppColors.textMuted, fontWeight: FontWeight.w700),
+                Flexible(
+                  child: Text(
+                    s.rememberMe,
+                    style: TextStyle(color: AppColors.txMuted(context), fontWeight: FontWeight.w700),
+                    overflow: TextOverflow.ellipsis,
+                  ),
                 ),
                 const Spacer(),
-                TextButton(
-                  onPressed: _busy
-                      ? null
-                      : () {
-                          Navigator.of(context).pushNamed(AppRoutes.forgotPassword);
-                        },
-                  child: const Text(
-                    'Forgot Password?',
-                    style: TextStyle(color: AppColors.textMuted),
+                Flexible(
+                  child: TextButton(
+                    onPressed: _busy
+                        ? null
+                        : () {
+                            Navigator.of(context).pushNamed(AppRoutes.forgotPassword);
+                          },
+                    child: Text(
+                      s.forgotPassword,
+                      style: TextStyle(color: AppColors.txMuted(context)),
+                      overflow: TextOverflow.ellipsis,
+                    ),
                   ),
                 ),
               ],
@@ -271,27 +328,33 @@ class _LoginScreenState extends State<LoginScreen> {
             const SizedBox(height: 10),
             FilledButton(
               onPressed: _busy ? null : _submit,
-              child: const Row(
+              child: Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  Text('SIGN IN TO DASHBOARD'),
+                  Flexible(
+                    child: Text(
+                      s.signInDashboard,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
                   SizedBox(width: 10),
                   Icon(Icons.arrow_forward, size: 18),
                 ],
               ),
             ),
+            const SizedBox(height: 6),
             const SizedBox(height: 22),
             Row(
               children: [
                 Expanded(
-                  child: Divider(color: AppColors.border.withValues(alpha: 0.8)),
+                  child: Divider(color: AppColors.bdr(context).withValues(alpha: 0.8)),
                 ),
-                const Padding(
-                  padding: EdgeInsets.symmetric(horizontal: 14),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 14),
                   child: Text(
-                    'OR CONTINUE WITH',
+                    s.orContinueWith,
                     style: TextStyle(
-                      color: AppColors.textMuted,
+                      color: AppColors.txMuted(context),
                       fontWeight: FontWeight.w800,
                       letterSpacing: 1.6,
                       fontSize: 11,
@@ -299,7 +362,7 @@ class _LoginScreenState extends State<LoginScreen> {
                   ),
                 ),
                 Expanded(
-                  child: Divider(color: AppColors.border.withValues(alpha: 0.8)),
+                  child: Divider(color: AppColors.bdr(context).withValues(alpha: 0.8)),
                 ),
               ],
             ),
@@ -307,23 +370,26 @@ class _LoginScreenState extends State<LoginScreen> {
             OutlinedButton.icon(
               onPressed: _busy ? null : _googleSignIn,
               icon: const Icon(Icons.g_mobiledata, size: 24),
-              label: const Text('Continue with Google'),
+              label: Text(s.continueWithGoogle),
             ),
             const SizedBox(height: 26),
             Row(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                const Text(
-                  'New scout on the team? ',
-                  style: TextStyle(color: AppColors.textMuted),
+                Flexible(
+                  child: Text(
+                    s.newScout,
+                    style: TextStyle(color: AppColors.txMuted(context)),
+                    overflow: TextOverflow.ellipsis,
+                  ),
                 ),
                 GestureDetector(
                   onTap: () {
                     Navigator.of(context).pushNamed(AppRoutes.register);
                   },
-                  child: const Text(
-                    'Register Hub',
-                    style: TextStyle(
+                  child: Text(
+                    s.registerHub,
+                    style: const TextStyle(
                       color: AppColors.primary,
                       fontWeight: FontWeight.w800,
                     ),
@@ -353,11 +419,11 @@ class _QuickButton extends StatelessWidget {
         height: 64,
         width: 64,
         decoration: BoxDecoration(
-          color: AppColors.surface2,
+          color: AppColors.surf2(context),
           borderRadius: BorderRadius.circular(18),
-          border: Border.all(color: AppColors.border.withValues(alpha: 0.9)),
+          border: Border.all(color: AppColors.bdr(context).withValues(alpha: 0.9)),
         ),
-        child: Icon(icon, color: AppColors.text, size: 26),
+        child: Icon(icon, color: AppColors.tx(context), size: 26),
       ),
     );
   }

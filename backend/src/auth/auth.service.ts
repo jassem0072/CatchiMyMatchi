@@ -1,7 +1,7 @@
 import bcrypt from 'bcryptjs';
 import axios from 'axios';
 import { createHash, randomBytes } from 'node:crypto';
-import { BadRequestException, Injectable, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, UnauthorizedException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import nodemailer, { type Transporter } from 'nodemailer';
 
@@ -101,6 +101,41 @@ export class AuthService {
     await this.users.resetPasswordByToken(e, this.hashResetToken(t), newPassword);
   }
 
+  private generateCode(): string {
+    const n = Math.floor(100000 + Math.random() * 900000);
+    return String(n);
+  }
+
+  private async sendVerificationCode(input: { to: string; code: string }): Promise<void> {
+    const from = String(process.env.SMTP_FROM || process.env.SMTP_USER || '').trim();
+    if (!from) throw new BadRequestException('Email service not configured (SMTP_FROM)');
+
+    const text =
+      `Welcome to ScoutAI!\n\n` +
+      `Your verification code is: ${input.code}\n\n` +
+      `Enter this code in the app to verify your email.\n\n` +
+      `If you did not create this account, you can ignore this email.\n`;
+
+    const html =
+      `<div style="font-family:Arial,sans-serif;max-width:500px;margin:0 auto;padding:24px;background:#0d1b2a;border-radius:12px;color:#fff;">` +
+      `<h2 style="color:#3b82f6;text-align:center;">Welcome to ScoutAI!</h2>` +
+      `<p style="text-align:center;">Your verification code is:</p>` +
+      `<div style="text-align:center;margin:24px 0;">` +
+      `<span style="display:inline-block;padding:16px 40px;background:#1e293b;border:2px solid #3b82f6;border-radius:12px;font-size:32px;font-weight:bold;letter-spacing:12px;color:#3b82f6;">${input.code}</span>` +
+      `</div>` +
+      `<p style="color:#94a3b8;font-size:12px;text-align:center;">Enter this code in the app to activate your account.</p>` +
+      `</div>`;
+
+    const mailer = this.getMailer();
+    await mailer.sendMail({
+      from,
+      to: input.to,
+      subject: 'ScoutAI - Your verification code',
+      text,
+      html,
+    });
+  }
+
   async register(input: {
     email: string;
     password: string;
@@ -108,9 +143,41 @@ export class AuthService {
     displayName?: string;
     position?: string;
     nation?: string;
-  }): Promise<{ accessToken: string }> {
+  }): Promise<{ email: string }> {
     const created = await this.users.createUser(input);
-    return this.issueToken(created._id.toString(), created.email, created.role);
+    return { email: created.email };
+  }
+
+  async resendVerificationCode(email: string): Promise<{ ok: boolean }> {
+    const e = (email || '').trim().toLowerCase();
+    if (!e) throw new BadRequestException('email is required');
+    const user = await this.users.findByEmail(e);
+    if (!user) throw new BadRequestException('User not found');
+
+    const code = this.generateCode();
+    await this.users.setEmailVerificationToken(user._id.toString(), code);
+    await this.sendVerificationCode({ to: user.email, code });
+
+    return { ok: true };
+  }
+
+  async verifyEmailCode(email: string, code: string): Promise<{ accessToken: string }> {
+    const e = (email || '').trim().toLowerCase();
+    const c = (code || '').trim();
+    if (!e) throw new BadRequestException('email is required');
+    if (!c) throw new BadRequestException('code is required');
+
+    const user = await this.users.findByEmail(e);
+    if (!user) throw new BadRequestException('User not found');
+    if (user.emailVerificationToken !== c) {
+      throw new BadRequestException('Invalid verification code');
+    }
+
+    user.emailVerified = true;
+    user.emailVerificationToken = '';
+    await user.save();
+
+    return this.issueToken(user._id.toString(), user.email, user.role);
   }
 
   async login(email: string, password: string): Promise<{ accessToken: string }> {
@@ -119,6 +186,25 @@ export class AuthService {
 
     const ok = await bcrypt.compare(password || '', user.passwordHash);
     if (!ok) throw new UnauthorizedException('Invalid credentials');
+
+    if ((user as any).isBanned) throw new ForbiddenException('Account suspended');
+
+    const code = this.generateCode();
+    await this.users.setEmailVerificationToken(user._id.toString(), code);
+    await this.sendVerificationCode({ to: user.email, code });
+
+    throw new UnauthorizedException('Verification code sent. Please verify your email with the 6-digit code to continue.');
+  }
+
+  async adminLogin(email: string, password: string): Promise<{ accessToken: string }> {
+    const user = await this.users.findByEmail(email);
+    if (!user) throw new UnauthorizedException('Invalid credentials');
+
+    const ok = await bcrypt.compare(password || '', user.passwordHash);
+    if (!ok) throw new UnauthorizedException('Invalid credentials');
+
+    if (user.role !== 'admin') throw new ForbiddenException('Admin access required');
+    if ((user as any).isBanned) throw new ForbiddenException('Account suspended');
 
     return this.issueToken(user._id.toString(), user.email, user.role);
   }
@@ -204,9 +290,83 @@ export class AuthService {
     return this.issueToken(createdOrUpdated._id.toString(), createdOrUpdated.email, createdOrUpdated.role);
   }
 
+  async loginWithGoogleWeb(input: {
+    email: string;
+    displayName?: string;
+    role?: UserRole;
+  }): Promise<{ accessToken: string }> {
+    const email = (input.email || '').trim().toLowerCase();
+    if (!email) throw new BadRequestException('email is required');
+
+    // Check if user already exists
+    const existing = await this.users.findByEmail(email);
+    if (existing) {
+      // Auto-verify email for Google users
+      if (!existing.emailVerified) {
+        existing.emailVerified = true;
+        await existing.save();
+      }
+      return this.issueToken(existing._id.toString(), existing.email, existing.role);
+    }
+
+    // New user — create with Google
+    const role = input.role || 'player';
+    const created = await this.users.createOrUpdateGoogleUser({
+      email,
+      googleSub: `web_${email}`,
+      displayName: input.displayName || '',
+      role: role as UserRole,
+    });
+
+    // Auto-verify email for Google users
+    created.emailVerified = true;
+    await created.save();
+
+    return this.issueToken(created._id.toString(), created.email, created.role);
+  }
+
+  async bootstrapAdmin(input: {
+    email: string;
+    password: string;
+    token: string;
+    displayName?: string;
+  }): Promise<{ accessToken: string }> {
+    const bootstrapToken = (process.env.ADMIN_BOOTSTRAP_TOKEN || '').trim();
+    if (!bootstrapToken) throw new ForbiddenException('Bootstrap not configured');
+    if (input.token !== bootstrapToken) throw new ForbiddenException('Invalid bootstrap token');
+
+    const existingAdmin = await this.users.findByEmail(input.email);
+    if (existingAdmin && existingAdmin.role === 'admin') {
+      throw new BadRequestException('Admin already exists');
+    }
+
+    const user = await this.users.createUser({
+      email: input.email,
+      password: input.password,
+      role: 'admin',
+      displayName: input.displayName || 'Admin',
+    });
+
+    // Mark as verified immediately
+    const dbUser = await this.users.findByEmail(user.email);
+    if (dbUser) {
+      dbUser.emailVerified = true;
+      dbUser.emailVerificationToken = '';
+      await dbUser.save();
+      return this.issueToken(dbUser._id.toString(), dbUser.email, dbUser.role);
+    }
+
+    throw new BadRequestException('Bootstrap failed');
+  }
+
   private issueToken(sub: string, email: string, role: UserRole): { accessToken: string } {
     const accessToken = this.jwt.sign({ sub, email, role });
     if (!accessToken) throw new BadRequestException('Failed to issue token');
     return { accessToken };
+  }
+
+  /** Public wrapper so other controllers (e.g. upgrade) can issue a fresh token. */
+  issueTokenPublic(sub: string, email: string, role: UserRole): { accessToken: string } {
+    return this.issueToken(sub, email, role);
   }
 }

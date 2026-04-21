@@ -15,7 +15,7 @@ let Video = class Video {
 };
 exports.Video = Video;
 __decorate([
-    (0, mongoose_1.Prop)({ default: null, index: true }),
+    (0, mongoose_1.Prop)({ type: String, default: null, index: true }),
     __metadata("design:type", Object)
 ], Video.prototype, "ownerId", void 0);
 __decorate([

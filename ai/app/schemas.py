@@ -36,7 +36,7 @@ Calibration = TwoPointsCalibration | HomographyCalibration
 class ProcessChunkRequest(BaseModel):
     chunkPathOrUrl: str
     chunkIndex: int
-    samplingFps: float = Field(3.0, gt=0)
+    samplingFps: float = Field(2.0, gt=0)
     selection: SelectionBBox | None = None
     calibration: Calibration | None = None
 
@@ -45,6 +45,8 @@ class Position(BaseModel):
     t: float
     cx: float
     cy: float
+    ncx: float | None = None
+    ncy: float | None = None
     conf: float
     bbox: list[float] | None = None
     trackId: int | None = None
@@ -58,6 +60,27 @@ class HeatmapPayload(BaseModel):
     bounds: dict[str, float]
 
 
+class MovementPayload(BaseModel):
+    directionChanges: int = 0
+    dirChangesPerMin: float = 0.0
+    avgTurnDegPerSec: float = 0.0
+    totalDurationSec: float = 0.0
+    zones: dict[str, float] | None = None
+    workRateMetersPerMin: float = 0.0
+    avgAccelMps2: float = 0.0
+    movingRatio: float = 0.0
+    numPositions: int = 0
+    maxPxPerSec: float = 0.0
+    medianPxPerSec: float = 0.0
+    totalPxDist: float = 0.0
+    p90AccelPxPerS2: float = 0.0
+    normMaxSpeedPerSec: float = 0.0
+    normMedianSpeedPerSec: float = 0.0
+    normTotalDist: float = 0.0
+    normP90AccelPerS2: float = 0.0
+    qualityScore: float = 0.0
+
+
 class MetricsPayload(BaseModel):
     distanceMeters: float | None
     avgSpeedKmh: float | None
@@ -65,6 +88,7 @@ class MetricsPayload(BaseModel):
     sprintCount: int
     accelPeaks: list[float]
     heatmap: HeatmapPayload
+    movement: MovementPayload | dict | None = None
 
 
 class ProcessChunkResponse(BaseModel):

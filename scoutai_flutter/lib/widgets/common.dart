@@ -22,16 +22,26 @@ class GradientScaffold extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
     return Container(
-      decoration: const BoxDecoration(
-        gradient: RadialGradient(
-          center: Alignment(-0.4, -0.9),
-          radius: 1.2,
-          colors: [
-            Color(0xFF151F33),
-            AppColors.background,
-          ],
-        ),
+      decoration: BoxDecoration(
+        gradient: isDark
+            ? const RadialGradient(
+                center: Alignment(-0.4, -0.9),
+                radius: 1.2,
+                colors: [
+                  Color(0xFF151F33),
+                  AppColors.background,
+                ],
+              )
+            : const RadialGradient(
+                center: Alignment(-0.4, -0.9),
+                radius: 1.2,
+                colors: [
+                  Color(0xFFFFFFFF),
+                  AppColors.backgroundLight,
+                ],
+              ),
       ),
       child: Scaffold(
         extendBodyBehindAppBar: extendBodyBehindAppBar,
@@ -87,9 +97,9 @@ class GlassCard extends StatelessWidget {
     return Container(
       padding: padding,
       decoration: BoxDecoration(
-        color: AppColors.surface.withValues(alpha: 0.92),
+        color: AppColors.surf(context).withValues(alpha: 0.92),
         borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: AppColors.border.withValues(alpha: 0.9)),
+        border: Border.all(color: AppColors.bdr(context).withValues(alpha: 0.9)),
       ),
       child: child,
     );
@@ -157,17 +167,17 @@ class MetricTile extends StatelessWidget {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
         decoration: BoxDecoration(
-          color: AppColors.surface2,
+          color: AppColors.surf2(context),
           borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: AppColors.border.withValues(alpha: 0.9)),
+          border: Border.all(color: AppColors.bdr(context).withValues(alpha: 0.9)),
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
               label.toUpperCase(),
-              style: const TextStyle(
-                color: AppColors.textMuted,
+              style: TextStyle(
+                color: AppColors.txMuted(context),
                 fontWeight: FontWeight.w800,
                 fontSize: 11,
                 letterSpacing: 1.0,
@@ -179,7 +189,7 @@ class MetricTile extends StatelessWidget {
               style: TextStyle(
                 fontWeight: FontWeight.w800,
                 fontSize: 18,
-                color: valueColor ?? AppColors.text,
+                color: valueColor ?? AppColors.tx(context),
               ),
             ),
           ],
@@ -206,9 +216,9 @@ class SegmentedTabs extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.all(6),
       decoration: BoxDecoration(
-        color: AppColors.surface2,
+        color: AppColors.surf2(context),
         borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: AppColors.border.withValues(alpha: 0.9)),
+        border: Border.all(color: AppColors.bdr(context).withValues(alpha: 0.9)),
       ),
       child: Row(
         children: [
@@ -231,7 +241,7 @@ class SegmentedTabs extends StatelessWidget {
                       style: TextStyle(
                         color: i == selectedIndex
                             ? Colors.white
-                            : AppColors.textMuted,
+                            : AppColors.txMuted(context),
                         fontWeight: FontWeight.w800,
                         fontSize: 12,
                         letterSpacing: 0.5,

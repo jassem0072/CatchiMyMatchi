@@ -1,16 +1,11 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
-import type { UserRole } from '../users/users.schema';
-
 export class RegisterDto {
   @ApiProperty()
   email!: string;
 
   @ApiProperty()
   password!: string;
-
-  @ApiPropertyOptional({ enum: ['player', 'scouter'] })
-  role?: UserRole;
 
   @ApiPropertyOptional()
   displayName?: string;
@@ -63,11 +58,19 @@ export class GoogleAuthDto {
   @ApiPropertyOptional({ description: 'Google access token from client (fallback when idToken is not available)' })
   accessToken?: string;
 
-  @ApiPropertyOptional({ enum: ['player', 'scouter'], description: 'Optional role for first-time users' })
-  role?: UserRole;
-
   @ApiPropertyOptional({ description: 'Optional display name override for first-time users' })
   displayName?: string;
+}
+
+export class GoogleWebAuthDto {
+  @ApiProperty({ description: 'Google-verified email from GIS sign-in on web' })
+  email!: string;
+
+  @ApiPropertyOptional({ description: 'Display name from Google account' })
+  displayName?: string;
+
+  @ApiPropertyOptional({ description: 'Role for new users (player or scouter)' })
+  role?: string;
 }
 
 export class AuthTokenResponse {

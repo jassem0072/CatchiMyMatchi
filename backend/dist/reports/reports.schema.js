@@ -23,7 +23,7 @@ __decorate([
     __metadata("design:type", String)
 ], Report.prototype, "playerId", void 0);
 __decorate([
-    (0, mongoose_1.Prop)({ default: null }),
+    (0, mongoose_1.Prop)({ type: String, default: null }),
     __metadata("design:type", Object)
 ], Report.prototype, "videoId", void 0);
 __decorate([

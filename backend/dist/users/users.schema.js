@@ -31,6 +31,10 @@ __decorate([
     __metadata("design:type", String)
 ], User.prototype, "displayName", void 0);
 __decorate([
+    (0, mongoose_1.Prop)({ default: '', index: true }),
+    __metadata("design:type", String)
+], User.prototype, "googleSub", void 0);
+__decorate([
     (0, mongoose_1.Prop)({ default: '' }),
     __metadata("design:type", String)
 ], User.prototype, "position", void 0);
@@ -38,8 +42,35 @@ __decorate([
     (0, mongoose_1.Prop)({ default: '' }),
     __metadata("design:type", String)
 ], User.prototype, "nation", void 0);
+__decorate([
+    (0, mongoose_1.Prop)({ default: '' }),
+    __metadata("design:type", String)
+], User.prototype, "portraitFile", void 0);
+__decorate([
+    (0, mongoose_1.Prop)({ type: Buffer, default: null }),
+    __metadata("design:type", Object)
+], User.prototype, "portraitData", void 0);
+__decorate([
+    (0, mongoose_1.Prop)({ default: '' }),
+    __metadata("design:type", String)
+], User.prototype, "portraitContentType", void 0);
+__decorate([
+    (0, mongoose_1.Prop)({ default: '' }),
+    __metadata("design:type", String)
+], User.prototype, "resetPasswordTokenHash", void 0);
+__decorate([
+    (0, mongoose_1.Prop)({ type: Date, default: null }),
+    __metadata("design:type", Object)
+], User.prototype, "resetPasswordExpiresAt", void 0);
+__decorate([
+    (0, mongoose_1.Prop)({ default: '' }),
+    __metadata("design:type", String)
+], User.prototype, "stripePaymentIntentId", void 0);
+__decorate([
+    (0, mongoose_1.Prop)({ type: Date, default: null }),
+    __metadata("design:type", Object)
+], User.prototype, "upgradedAt", void 0);
 exports.User = User = __decorate([
     (0, mongoose_1.Schema)({ timestamps: true })
 ], User);
 exports.UserSchema = mongoose_1.SchemaFactory.createForClass(User);
-exports.UserSchema.index({ email: 1 }, { unique: true });

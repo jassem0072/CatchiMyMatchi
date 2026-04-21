@@ -25,18 +25,28 @@ let PlayersController = class PlayersController {
     }
     async list(req) {
         const me = req.user;
-        return this.players.list(me.sub);
+        const scouterId = me.role === 'scouter' ? me.sub : '';
+        return this.players.list(scouterId);
     }
     async get(req, playerId) {
         const me = req.user;
-        return this.players.getPlayer(playerId, me.sub);
+        const scouterId = me.role === 'scouter' ? me.sub : '';
+        return this.players.getPlayer(playerId, scouterId);
     }
     async videos(playerId) {
         return this.players.getPlayerVideos(playerId);
     }
     async dashboard(req, playerId) {
         const me = req.user;
-        return this.players.dashboard(playerId, me.sub);
+        const scouterId = me.role === 'scouter' ? me.sub : '';
+        return this.players.dashboard(playerId, scouterId);
+    }
+    async portrait(playerId, res) {
+        const portrait = await this.players.getPlayerPortrait(playerId);
+        if (!portrait)
+            throw new common_1.NotFoundException('Portrait not found');
+        res.setHeader('Content-Type', portrait.contentType || 'image/jpeg');
+        return res.send(portrait.data);
     }
 };
 exports.PlayersController = PlayersController;
@@ -70,11 +80,19 @@ __decorate([
     __metadata("design:paramtypes", [Object, String]),
     __metadata("design:returntype", Promise)
 ], PlayersController.prototype, "dashboard", null);
+__decorate([
+    (0, common_1.Get)(':playerId/portrait'),
+    __param(0, (0, common_1.Param)('playerId')),
+    __param(1, (0, common_1.Res)()),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [String, Object]),
+    __metadata("design:returntype", Promise)
+], PlayersController.prototype, "portrait", null);
 exports.PlayersController = PlayersController = __decorate([
     (0, swagger_1.ApiTags)('players'),
     (0, swagger_1.ApiBearerAuth)(),
     (0, common_1.Controller)('players'),
     (0, common_1.UseGuards)(jwt_auth_guard_1.JwtAuthGuard, roles_guard_1.RolesGuard),
-    (0, roles_decorator_1.Roles)('scouter'),
+    (0, roles_decorator_1.Roles)('scouter', 'player'),
     __metadata("design:paramtypes", [players_service_1.PlayersService])
 ], PlayersController);

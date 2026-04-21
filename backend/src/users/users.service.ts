@@ -127,6 +127,20 @@ export class UsersService {
     return this.userModel.findOne({ email: e });
   }
 
+  async setEmailVerificationToken(userId: string, token: string): Promise<void> {
+    await this.userModel.findByIdAndUpdate(userId, { emailVerificationToken: token });
+  }
+
+  async verifyEmail(token: string): Promise<boolean> {
+    if (!token) return false;
+    const user = await this.userModel.findOne({ emailVerificationToken: token });
+    if (!user) return false;
+    user.emailVerified = true;
+    user.emailVerificationToken = '';
+    await user.save();
+    return true;
+  }
+
   async setResetPasswordTokenByEmail(
     email: string,
     tokenHash: string,
@@ -236,11 +250,152 @@ export class UsersService {
     return u;
   }
 
+  async setBadgeData(id: string, badgeData: Buffer, badgeContentType: string): Promise<any> {
+    const u = await this.userModel
+      .findByIdAndUpdate(
+        id,
+        { badgeData, badgeContentType },
+        { new: true },
+      )
+      .select('-portraitData -badgeData')
+      .lean();
+    if (!u) throw new NotFoundException('User not found');
+    return u;
+  }
+
+  async verifyBadge(id: string): Promise<any> {
+    const user: any = await this.userModel.findById(id).select('badgeData badgeContentType').lean();
+    if (!user) throw new NotFoundException('User not found');
+    if (!user.badgeData || (Buffer.isBuffer(user.badgeData) && user.badgeData.length === 0)) {
+      throw new BadRequestException('Upload a badge/diploma first');
+    }
+    const u = await this.userModel
+      .findByIdAndUpdate(id, { badgeVerified: true }, { new: true })
+      .select('-portraitData -badgeData')
+      .lean();
+    if (!u) throw new NotFoundException('User not found');
+    return u;
+  }
+
+  async getBadgeForUser(id: string): Promise<{ data: Buffer; contentType: string } | null> {
+    const u: any = await this.userModel
+      .findById(id)
+      .select('badgeData badgeContentType')
+      .lean();
+    if (!u) throw new NotFoundException('User not found');
+    const data = this.coerceToBuffer(u.badgeData);
+    if (!data || data.length === 0) return null;
+    return {
+      data,
+      contentType: (u.badgeContentType as string) || 'image/jpeg',
+    };
+  }
+
+  async upgradeToScouter(userId: string, paymentIntentId: string, tier: 'basic' | 'premium' | 'elite' = 'basic'): Promise<UserDocument> {
+    const user = await this.userModel.findById(userId);
+    if (!user) throw new NotFoundException('User not found');
+
+    const now = new Date();
+    const thirtyDays = 30 * 24 * 60 * 60 * 1000;
+    const newExpiry = new Date(now.getTime() + thirtyDays);
+
+    if (tier === 'basic') {
+      // Set or renew basic
+      user.basicExpiresAt = newExpiry;
+    } else if (tier === 'premium') {
+      // Set premium with 30 days
+      user.premiumExpiresAt = newExpiry;
+      // Freeze basic: extend its remaining time by 30 days so it doesn't tick during premium
+      if (user.basicExpiresAt && user.basicExpiresAt > now) {
+        user.basicExpiresAt = new Date(user.basicExpiresAt.getTime() + thirtyDays);
+      }
+    } else if (tier === 'elite') {
+      // Set elite with 30 days
+      user.eliteExpiresAt = newExpiry;
+      // Freeze lower tiers by extending them 30 days
+      if (user.premiumExpiresAt && user.premiumExpiresAt > now) {
+        user.premiumExpiresAt = new Date(user.premiumExpiresAt.getTime() + thirtyDays);
+      }
+      if (user.basicExpiresAt && user.basicExpiresAt > now) {
+        user.basicExpiresAt = new Date(user.basicExpiresAt.getTime() + thirtyDays);
+      }
+    }
+
+    // Derive active tier = highest non-expired tier
+    const activeTier = this._computeActiveTier(user, now);
+    const activeExpiry = this._computeActiveExpiry(user, activeTier);
+
+    user.role = 'scouter';
+    user.stripePaymentIntentId = paymentIntentId;
+    user.subscriptionTier = activeTier;
+    user.upgradedAt = now;
+    user.subscriptionExpiresAt = activeExpiry;
+
+    await user.save();
+    return user;
+  }
+
+  private _computeActiveTier(user: UserDocument, now: Date): 'basic' | 'premium' | 'elite' | null {
+    if ((user as any).eliteExpiresAt && (user as any).eliteExpiresAt > now) return 'elite';
+    if ((user as any).premiumExpiresAt && (user as any).premiumExpiresAt > now) return 'premium';
+    if ((user as any).basicExpiresAt && (user as any).basicExpiresAt > now) return 'basic';
+    return null;
+  }
+
+  private _computeActiveExpiry(user: UserDocument, tier: 'basic' | 'premium' | 'elite' | null): Date | null {
+    if (tier === 'elite') return (user as any).eliteExpiresAt ?? null;
+    if (tier === 'premium') return (user as any).premiumExpiresAt ?? null;
+    if (tier === 'basic') return (user as any).basicExpiresAt ?? null;
+    return null;
+  }
+
   async listPlayers(): Promise<any[]> {
     return this.userModel
       .find({ role: 'player' })
       .select('-passwordHash -portraitData -resetPasswordTokenHash -resetPasswordExpiresAt')
       .sort({ createdAt: -1 })
       .lean();
+  }
+
+  async updateProfile(
+    id: string,
+    data: { displayName?: string; position?: string; nation?: string; dateOfBirth?: string; height?: number },
+  ): Promise<any> {
+    const update: Record<string, any> = {};
+    if (data.displayName !== undefined) update.displayName = data.displayName.trim();
+    if (data.position !== undefined) update.position = data.position.trim();
+    if (data.nation !== undefined) update.nation = data.nation.trim();
+    if (data.dateOfBirth !== undefined) update.dateOfBirth = data.dateOfBirth ? new Date(data.dateOfBirth) : null;
+    if (data.height !== undefined) update.height = data.height ?? null;
+
+    const u = await this.userModel
+      .findByIdAndUpdate(id, update, { new: true })
+      .select('-passwordHash -portraitData -resetPasswordTokenHash -resetPasswordExpiresAt')
+      .lean();
+    if (!u) throw new NotFoundException('User not found');
+    return u;
+  }
+
+  async changePassword(
+    id: string,
+    currentPassword: string,
+    newPassword: string,
+  ): Promise<void> {
+    if (!newPassword || newPassword.length < 6) {
+      throw new BadRequestException('Password must be at least 6 characters');
+    }
+    const u = await this.userModel.findById(id).select('passwordHash');
+    if (!u) throw new NotFoundException('User not found');
+
+    const match = await bcrypt.compare(currentPassword, u.passwordHash);
+    if (!match) throw new BadRequestException('Current password is incorrect');
+
+    u.passwordHash = await bcrypt.hash(newPassword, 10);
+    await u.save();
+  }
+
+  async deleteUser(id: string): Promise<void> {
+    const result = await this.userModel.findByIdAndDelete(id);
+    if (!result) throw new NotFoundException('User not found');
   }
 }
