@@ -1,0 +1,17 @@
+# Fly.io deployment config for scoutai-ai (YOLO tracker)
+app = "scoutai-ai"
+primary_region = "cdg"
+
+[build]
+  dockerfile = "ai/Dockerfile"
+
+[http_service]
+  internal_port = 8001
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+[[vm]]
+  cpu = 1
+  memory = "512mb"

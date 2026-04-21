@@ -1,0 +1,66 @@
+services:
+  # Backend API
+  - type: web
+    name: scoutai-backend
+    runtime: node
+    buildCommand: cd backend && npm install && npm run build
+    startCommand: cd backend && node dist/main.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3000
+      - key: MONGODB_URI
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true
+      - key: JWT_EXPIRES_IN
+        value: 7d
+      - key: CORS_ORIGINS
+        value: "*"
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        value: 587
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASS
+        sync: false
+      - key: SMTP_FROM
+        sync: false
+      - key: APP_BASE_URL
+        sync: false
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_PUBLISHABLE_KEY
+        sync: false
+      - key: ADMIN_BOOTSTRAP_TOKEN
+        sync: false
+      - key: AI_SERVICE_URL
+        sync: false
+      - key: MONTAGE_SERVICE_URL
+        sync: false
+    plan: free
+
+  # Admin Dashboard
+  - type: web
+    name: scoutai-admin
+    runtime: static
+    buildCommand: cd admin && npm install && npm run build
+    staticPublishPath: admin/dist
+    envVars:
+      - key: VITE_API_URL
+        sync: false
+    plan: free
+
+  # MongoDB
+  - type: pserv
+    name: scoutai-mongo
+    runtime: image
+    image:
+      url: mongo:7
+    plan: free
