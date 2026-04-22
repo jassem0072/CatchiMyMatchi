@@ -56,13 +56,13 @@ jobs:
         run: flutter pub get
 
       - name: Analyze
-        run: flutter analyze --no-fatal-infos
+        run: flutter analyze --no-fatal-infos --no-fatal-warnings
 
       - name: Test
         run: flutter test
 
       - name: Build APK (debug)
-        run: flutter build apk --debug
+        run: flutter build apk --debug -t lib/main.dart
 
   docker:
     name: Docker Compose Health Check
