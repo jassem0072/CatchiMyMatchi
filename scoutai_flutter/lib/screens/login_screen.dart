@@ -146,6 +146,10 @@ class _LoginScreenState extends State<LoginScreen> {
     final token = await AuthStorage.loadToken();
     if (!mounted) return;
     if (token == null) return;
+    if (!_looksLikeJwt(token)) {
+      await AuthStorage.clear();
+      return;
+    }
     try {
       await AuthApi().me(token);
       if (!mounted) return;
@@ -158,6 +162,11 @@ class _LoginScreenState extends State<LoginScreen> {
     } catch (_) {
       await AuthStorage.clear();
     }
+  }
+
+  bool _looksLikeJwt(String token) {
+    final parts = token.split('.');
+    return parts.length == 3 && parts.every((p) => p.trim().isNotEmpty);
   }
 
   Future<void> _submit() async {

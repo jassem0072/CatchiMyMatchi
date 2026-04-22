@@ -33,9 +33,19 @@ class AuthApi {
 
     final data = _decodeJson(res);
     if (res.statusCode >= 400) throw Exception(_errorMessage(data) ?? 'Sign up failed');
+    // Current backend returns { email } for signup, not a JWT token.
+    final returnedEmail = data['email'];
+    if (returnedEmail is String && returnedEmail.trim().isNotEmpty) {
+      return returnedEmail.trim();
+    }
+
+    // Backward-compatible fallback if an older backend returns accessToken.
     final token = data['accessToken'];
-    if (token is! String || token.isEmpty) throw Exception('Missing accessToken');
-    return token;
+    if (token is String && token.isNotEmpty) {
+      return email.trim();
+    }
+
+    throw Exception('Unexpected signup response');
   }
 
   Future<String> google({String? idToken, String? accessToken, String? role}) async {
@@ -182,6 +192,7 @@ class AuthApi {
     String? nation,
     String? dateOfBirth,
     int? height,
+    String? playerIdNumber,
   }) async {
     final uri = Uri.parse('$baseUrl/me');
     final res = await http.patch(
@@ -196,6 +207,7 @@ class AuthApi {
         if (nation != null) 'nation': nation,
         if (dateOfBirth != null) 'dateOfBirth': dateOfBirth,
         if (height != null) 'height': height,
+        if (playerIdNumber != null) 'playerIdNumber': playerIdNumber,
       }),
     );
     final data = _decodeJson(res);
@@ -240,6 +252,40 @@ class AuthApi {
     );
     final data = _decodeJson(res);
     if (res.statusCode >= 400) throw Exception(_errorMessage(data) ?? 'Failed to check upgrade status');
+    return data;
+  }
+
+  Future<Map<String, dynamic>> saveCommunicationQuizResult(
+    String currentToken, {
+    required String language,
+    required int score,
+    required int totalQuestions,
+    required String readinessBand,
+    String? communicationStyle,
+    String? captaincySummary,
+  }) async {
+    final uri = Uri.parse('$baseUrl/me/communication-quiz');
+    final res = await http.post(
+      uri,
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer $currentToken',
+      },
+      body: jsonEncode({
+        'language': language,
+        'score': score,
+        'totalQuestions': totalQuestions,
+        'readinessBand': readinessBand,
+        if (communicationStyle != null && communicationStyle.isNotEmpty)
+          'communicationStyle': communicationStyle,
+        if (captaincySummary != null && captaincySummary.isNotEmpty)
+          'captaincySummary': captaincySummary,
+      }),
+    );
+    final data = _decodeJson(res);
+    if (res.statusCode >= 400) {
+      throw Exception(_errorMessage(data) ?? 'Failed to save communication quiz result');
+    }
     return data;
   }
 
