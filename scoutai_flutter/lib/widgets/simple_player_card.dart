@@ -11,6 +11,7 @@ class SimplePlayerCard extends StatelessWidget {
     required this.stats,
     this.position = 'CM',
     this.portraitBytes,
+    this.isVerified,
     this.onTap,
   });
 
@@ -18,6 +19,7 @@ class SimplePlayerCard extends StatelessWidget {
   final FifaCardStats stats;
   final String position;
   final Uint8List? portraitBytes;
+  final bool? isVerified;
   final VoidCallback? onTap;
 
   Color _getTierColor() {
@@ -99,6 +101,51 @@ class SimplePlayerCard extends StatelessWidget {
                   ),
 
                   const SizedBox(height: 6),
+
+                  // Verification chip
+                  if (isVerified != null)
+                    Align(
+                      alignment: Alignment.topLeft,
+                      child: Container(
+                        margin: const EdgeInsets.only(left: 8),
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: isVerified == true
+                              ? const Color(0xFF00E676).withValues(alpha: 0.18)
+                              : const Color(0xFFFFB300).withValues(alpha: 0.18),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(
+                            color: isVerified == true
+                                ? const Color(0xFF00E676)
+                                : const Color(0xFFFFB300),
+                          ),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              isVerified == true ? Icons.verified_rounded : Icons.pending_rounded,
+                              size: 10,
+                              color: isVerified == true
+                                  ? const Color(0xFF00E676)
+                                  : const Color(0xFFFFB300),
+                            ),
+                            const SizedBox(width: 4),
+                            Text(
+                              isVerified == true ? 'VERIFIED' : 'PENDING',
+                              style: TextStyle(
+                                fontSize: 8,
+                                fontWeight: FontWeight.w900,
+                                letterSpacing: 1,
+                                color: isVerified == true
+                                    ? const Color(0xFF00E676)
+                                    : const Color(0xFFFFB300),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
 
                   // Portrait with tier halo
                   Container(

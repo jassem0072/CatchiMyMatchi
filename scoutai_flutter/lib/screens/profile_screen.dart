@@ -4,12 +4,14 @@ import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:file_picker/file_picker.dart';
 import 'package:http_parser/http_parser.dart';
-import 'dart:typed_data';
+import 'package:share_plus/share_plus.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../app/scoutai_app.dart';
 import '../services/api_config.dart';
 import '../services/auth_api.dart';
 import '../services/auth_storage.dart';
+import '../services/contract_fee_billing_service.dart';
 import '../services/jwt_utils.dart';
 import '../services/translations.dart';
 import '../theme/app_colors.dart';
@@ -31,6 +33,7 @@ class _ProfileScreenState extends State<ProfileScreen> with SingleTickerProvider
   bool _portraitLoading = false;
   bool _portraitUploading = false;
   bool _upgrading = false;
+  bool _processingContractFee = false;
   Uint8List? _badgeBytes;
   bool _badgeLoading = false;
   bool _badgeUploading = false;
@@ -75,11 +78,6 @@ class _ProfileScreenState extends State<ProfileScreen> with SingleTickerProvider
       }
       return true;
     });
-  }
-
-  @override
-  void dispose() {
-    super.dispose();
   }
 
   Future<void> _load() async {
@@ -390,6 +388,243 @@ class _ProfileScreenState extends State<ProfileScreen> with SingleTickerProvider
     Navigator.of(context).pushNamedAndRemoveUntil(AppRoutes.login, (_) => false);
   }
 
+  Future<Map<String, dynamic>?> _showOptionalContractFeeDialog() async {
+    final contractAmountCtrl = TextEditingController();
+    final percentageCtrl = TextEditingController(text: '3');
+    final contractRefCtrl = TextEditingController();
+    final cardCtrl = TextEditingController();
+    final expiryCtrl = TextEditingController();
+    final cvcCtrl = TextEditingController();
+
+    Map<String, dynamic>? result;
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) {
+        String? error;
+        return StatefulBuilder(
+          builder: (ctx, setModalState) {
+            final amount = double.tryParse(contractAmountCtrl.text.trim()) ?? 0;
+            final pct = double.tryParse(percentageCtrl.text.trim()) ?? 0;
+            final cardRaw = cardCtrl.text.replaceAll(RegExp(r'\s+'), '');
+            final expiryRaw = expiryCtrl.text.trim();
+            final cvcRaw = cvcCtrl.text.trim();
+            final canPay = amount > 0 && pct > 0 && cardRaw.length >= 13 && expiryRaw.contains('/') && cvcRaw.length >= 3;
+            final fee = amount * (pct / 100);
+
+            return AlertDialog(
+              backgroundColor: AppColors.surf(context),
+              title: const Text('Optional Contract Fee Payment', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w800)),
+              content: SizedBox(
+                width: 380,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Pay an optional contract percentage from your profile. A PDF invoice will be generated and can be sent by email.',
+                      style: TextStyle(color: Colors.white70, fontSize: 12),
+                    ),
+                    const SizedBox(height: 10),
+                    TextField(
+                      controller: contractRefCtrl,
+                      onChanged: (_) => setModalState(() => error = null),
+                      decoration: const InputDecoration(
+                        labelText: 'Contract reference',
+                        hintText: 'e.g. PSG-2026-PLAYER-07',
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    TextField(
+                      controller: contractAmountCtrl,
+                      keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                      onChanged: (_) => setModalState(() => error = null),
+                      decoration: const InputDecoration(
+                        labelText: 'Contract amount (EUR)',
+                        hintText: 'e.g. 100000',
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    TextField(
+                      controller: percentageCtrl,
+                      keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                      onChanged: (_) => setModalState(() => error = null),
+                      decoration: const InputDecoration(
+                        labelText: 'Percentage',
+                        hintText: '3',
+                        suffixText: '%',
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      'Total to pay: EUR ${fee.toStringAsFixed(2)}',
+                      style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700),
+                    ),
+                    const SizedBox(height: 10),
+                    TextField(
+                      controller: cardCtrl,
+                      keyboardType: TextInputType.number,
+                      onChanged: (_) => setModalState(() => error = null),
+                      decoration: const InputDecoration(
+                        labelText: 'Card number',
+                        hintText: '4242 4242 4242 4242',
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: expiryCtrl,
+                            keyboardType: TextInputType.datetime,
+                            onChanged: (_) => setModalState(() => error = null),
+                            decoration: const InputDecoration(
+                              labelText: 'Expiry',
+                              hintText: 'MM/YY',
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: TextField(
+                            controller: cvcCtrl,
+                            keyboardType: TextInputType.number,
+                            obscureText: true,
+                            onChanged: (_) => setModalState(() => error = null),
+                            decoration: const InputDecoration(
+                              labelText: 'CVC',
+                              hintText: '123',
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    if (error != null) ...[
+                      const SizedBox(height: 8),
+                      Text(error!, style: const TextStyle(color: AppColors.danger, fontSize: 12, fontWeight: FontWeight.w600)),
+                    ],
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(onPressed: () => Navigator.of(ctx).pop(), child: const Text('Cancel')),
+                FilledButton.icon(
+                  onPressed: !canPay
+                      ? null
+                      : () {
+                          final amountValue = double.tryParse(contractAmountCtrl.text.trim()) ?? 0;
+                          final pctValue = double.tryParse(percentageCtrl.text.trim()) ?? 0;
+                          final parts = expiryCtrl.text.trim().split('/');
+                          final cardNumber = cardCtrl.text.replaceAll(RegExp(r'\s+'), '');
+                          final cvc = cvcCtrl.text.trim();
+                          if (amountValue <= 0 || pctValue <= 0) {
+                            setModalState(() => error = 'Enter a valid amount and percentage');
+                            return;
+                          }
+                          if (parts.length != 2) {
+                            setModalState(() => error = 'Expiry must be MM/YY');
+                            return;
+                          }
+                          final mm = int.tryParse(parts[0]) ?? 0;
+                          if (cardNumber.length < 13 || mm < 1 || mm > 12 || cvc.length < 3) {
+                            setModalState(() => error = 'Enter valid card details');
+                            return;
+                          }
+                          result = {
+                            'contractReference': contractRefCtrl.text.trim(),
+                            'contractAmount': amountValue,
+                            'percentage': pctValue,
+                          };
+                          Navigator.of(ctx).pop();
+                        },
+                  icon: const Icon(Icons.receipt_long_outlined),
+                  label: const Text('Pay and Generate Invoice'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+
+    contractAmountCtrl.dispose();
+    percentageCtrl.dispose();
+    contractRefCtrl.dispose();
+    cardCtrl.dispose();
+    expiryCtrl.dispose();
+    cvcCtrl.dispose();
+    return result;
+  }
+
+  Future<void> _payOptionalContractFee() async {
+    final details = await _showOptionalContractFeeDialog();
+    if (details == null || !mounted) return;
+
+    setState(() {
+      _processingContractFee = true;
+      _error = null;
+    });
+
+    try {
+      final payerName = _displayName();
+      final payerEmail = _email();
+      final contractReference = (details['contractReference'] ?? '').toString();
+      final contractAmount = (details['contractAmount'] as num).toDouble();
+      final percentage = (details['percentage'] as num).toDouble();
+
+      final result = await ContractFeeBillingService.createOptionalPayment(
+        payerName: payerName,
+        payerEmail: payerEmail,
+        contractReference: contractReference,
+        currency: 'EUR',
+        contractAmount: contractAmount,
+        percentage: percentage,
+      );
+
+      if (!mounted) return;
+
+      final body = 'Invoice ${result.invoice.invoiceNumber} for optional contract percentage payment (${result.invoice.currency} ${result.invoice.feeAmount.toStringAsFixed(2)}).';
+      final subject = 'ScoutAI Invoice ${result.invoice.invoiceNumber}';
+      final mailUri = Uri(
+        scheme: 'mailto',
+        path: payerEmail,
+        queryParameters: <String, String>{
+          'subject': subject,
+          'body': body,
+        },
+      );
+
+      if (result.invoice.invoiceFilePath != null && result.invoice.invoiceFilePath!.isNotEmpty) {
+        await Share.shareXFiles(
+          [XFile(result.invoice.invoiceFilePath!)],
+          text: 'ScoutAI invoice ${result.invoice.invoiceNumber}. You can choose your email app to send it.',
+          subject: subject,
+        );
+      }
+
+      if (await canLaunchUrl(mailUri)) {
+        await launchUrl(mailUri);
+      }
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Optional payment recorded. Invoice ${result.invoice.invoiceNumber} generated.'),
+          backgroundColor: AppColors.success,
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = e.toString().replaceFirst('Exception: ', '');
+      });
+    } finally {
+      if (mounted) {
+        setState(() => _processingContractFee = false);
+      }
+    }
+  }
+
   Widget _buildAvatar() {
     final token = _token;
     final canShowPortrait = token != null;
@@ -479,6 +714,58 @@ class _ProfileScreenState extends State<ProfileScreen> with SingleTickerProvider
     final me = _me;
     if (me != null && me['role'] is String) return (me['role'] as String).toUpperCase();
     return '-';
+  }
+
+  bool _hasAnyValue(List<dynamic> values) {
+    for (final value in values) {
+      if (value == null) continue;
+      if (value is String && value.trim().isNotEmpty) return true;
+      if (value is List && value.isNotEmpty) return true;
+      if (value is Map && value.isNotEmpty) return true;
+      if (value is bool && value) return true;
+      if (value is num && value != 0) return true;
+    }
+    return false;
+  }
+
+  Map<String, bool> _profileChecklistState() {
+    final hasPhoto = _portraitBytes != null ||
+        _hasAnyValue([
+          _me?['picture'],
+          _me?['photo'],
+          _me?['avatar'],
+          _me?['profileImage'],
+          _me?['portraitFile'],
+        ]);
+    final hasPosition = (_me?['position'] ?? '').toString().trim().isNotEmpty;
+
+    return {
+      'Photo': hasPhoto,
+      'Position': hasPosition,
+    };
+  }
+
+  Widget _profileChecklistRow(String label, bool complete) {
+    return Row(
+      children: [
+        Icon(
+          complete ? Icons.check_circle_rounded : Icons.cancel_outlined,
+          size: 16,
+          color: complete ? AppColors.success : AppColors.danger,
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text(
+            label,
+            style: TextStyle(
+              color: complete ? AppColors.tx(context) : AppColors.txMuted(context),
+              fontWeight: FontWeight.w700,
+              fontSize: 12,
+            ),
+          ),
+        ),
+      ],
+    );
   }
 
   bool get _isUnverifiedScouter {
@@ -872,6 +1159,118 @@ class _ProfileScreenState extends State<ProfileScreen> with SingleTickerProvider
               ),
             ],
           ),
+          if (_me != null && _me!['role'] == 'player') ...[
+            const SizedBox(height: 14),
+            GlassCard(
+              child: Row(
+                children: [
+                  Container(
+                    height: 40,
+                    width: 40,
+                    decoration: BoxDecoration(
+                      gradient: const LinearGradient(colors: [AppColors.primary, Color(0xFF35C4B3)]),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: const Icon(Icons.task_alt, color: Colors.white, size: 22),
+                  ),
+                  const SizedBox(width: 12),
+                  const Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Complete your profile',
+                          style: TextStyle(fontWeight: FontWeight.w900, fontSize: 15),
+                        ),
+                        SizedBox(height: 3),
+                        Text(
+                          'Tap here to complete or update your player profile.',
+                          style: TextStyle(color: AppColors.textMuted, fontSize: 12),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  FilledButton(
+                    onPressed: () => Navigator.of(context).pushNamed(AppRoutes.editProfile),
+                    child: const Text('Complete'),
+                  ),
+                ],
+              ),
+            ),
+          ],
+          if (_me != null && _me!['role'] == 'player') ...[
+            const SizedBox(height: 12),
+            Builder(
+              builder: (_) {
+                final checklist = _profileChecklistState();
+                final doneCount = checklist.values.where((done) => done).length;
+                final score = checklist.isEmpty
+                    ? 0
+                    : ((doneCount / checklist.length) * 100).round();
+
+                return GlassCard(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          const Icon(Icons.verified_user_outlined, color: AppColors.primary, size: 18),
+                          const SizedBox(width: 8),
+                          const Expanded(
+                            child: Text(
+                              'Profile Completion Score',
+                              style: TextStyle(fontWeight: FontWeight.w900, fontSize: 14),
+                            ),
+                          ),
+                          Text(
+                            '$doneCount/${checklist.length}',
+                            style: const TextStyle(
+                              color: AppColors.textMuted,
+                              fontWeight: FontWeight.w800,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        '$score% complete',
+                        style: const TextStyle(
+                          color: AppColors.primary,
+                          fontWeight: FontWeight.w900,
+                          fontSize: 17,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(999),
+                        child: LinearProgressIndicator(
+                          value: (score / 100).clamp(0.0, 1.0),
+                          minHeight: 8,
+                          backgroundColor: AppColors.bdr(context),
+                          valueColor: const AlwaysStoppedAnimation<Color>(AppColors.primary),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      _profileChecklistRow('Photo', checklist['Photo'] ?? false),
+                      const SizedBox(height: 8),
+                      _profileChecklistRow('Position', checklist['Position'] ?? false),
+                      const SizedBox(height: 12),
+                      SizedBox(
+                        width: double.infinity,
+                        child: FilledButton.icon(
+                          onPressed: () => Navigator.of(context).pushNamed(AppRoutes.editProfile),
+                          icon: const Icon(Icons.edit_outlined, size: 16),
+                          label: const Text('Complete profile'),
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              },
+            ),
+          ],
           const SizedBox(height: 22),
           Text(
             s.accountSettings,
@@ -879,6 +1278,12 @@ class _ProfileScreenState extends State<ProfileScreen> with SingleTickerProvider
           ),
           const SizedBox(height: 12),
           _SettingTile(icon: Icons.person_outline, label: s.editProfile, onTap: () => Navigator.of(context).pushNamed(AppRoutes.editProfile)),
+          if (_me != null && _me!['role'] == 'player')
+            _SettingTile(
+              icon: Icons.record_voice_over_outlined,
+              label: 'Take Communication Quiz',
+              onTap: () => Navigator.of(context).pushNamed(AppRoutes.communicationQuiz),
+            ),
           _SettingTile(icon: Icons.notifications_none, label: s.notifications, onTap: () => Navigator.of(context).pushNamed(AppRoutes.notifications)),
           _SettingTile(icon: Icons.lock_outline, label: s.securityPrivacy, onTap: () => Navigator.of(context).pushNamed(AppRoutes.securityPrivacy)),
           // ── Badge / Diploma Verification (scouters only) ──
@@ -1043,6 +1448,43 @@ class _ProfileScreenState extends State<ProfileScreen> with SingleTickerProvider
             )
           else if (_me != null && _me!['role'] == 'scouter')
             _buildSubscriptionStatus(),
+          if (_me != null && _me!['role'] == 'scouter') ...[
+            const SizedBox(height: 10),
+            GestureDetector(
+              onTap: _processingContractFee ? null : _payOptionalContractFee,
+              child: GlassCard(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                child: Row(
+                  children: [
+                    Container(
+                      height: 38,
+                      width: 38,
+                      decoration: BoxDecoration(
+                        gradient: const LinearGradient(colors: [Color(0xFF16A34A), Color(0xFF35C4B3)]),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: const Icon(Icons.payments_outlined, color: Colors.white, size: 20),
+                    ),
+                    const SizedBox(width: 14),
+                    const Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text('Pay Contract Percentage (Optional)', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 15, color: Colors.white)),
+                          SizedBox(height: 2),
+                          Text('Generate invoice + send by email', style: TextStyle(color: AppColors.textMuted, fontSize: 12)),
+                        ],
+                      ),
+                    ),
+                    if (_processingContractFee)
+                      const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
+                    else
+                      const Icon(Icons.chevron_right, color: AppColors.primary),
+                  ],
+                ),
+              ),
+            ),
+          ],
           _SettingTile(icon: Icons.receipt_long, label: s.billingHistory, onTap: () => Navigator.of(context).pushNamed(AppRoutes.billingHistory)),
           const SizedBox(height: 18),
           FilledButton(
@@ -1552,48 +1994,6 @@ class _InAppPaymentDialogState extends State<_InAppPaymentDialog> {
           label: Text(_processing ? S.current.processingPayment : 'Pay €$_selectedPrice'),
         ),
       ],
-    );
-  }
-}
-
-/// Display a single feature row with checkmarks for each tier
-class _TierFeature extends StatelessWidget {
-  const _TierFeature({required this.label, required this.basic, required this.premium, required this.elite});
-  final String label;
-  final bool basic;
-  final bool premium;
-  final bool elite;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 6),
-      child: Row(
-        children: [
-          Expanded(
-            flex: 3,
-            child: Text(label, style: const TextStyle(fontSize: 12)),
-          ),
-          _FeatureCheck(enabled: basic),
-          _FeatureCheck(enabled: premium),
-          _FeatureCheck(enabled: elite),
-        ],
-      ),
-    );
-  }
-}
-
-class _FeatureCheck extends StatelessWidget {
-  const _FeatureCheck({required this.enabled});
-  final bool enabled;
-
-  @override
-  Widget build(BuildContext context) {
-    return SizedBox(
-      width: 32,
-      child: enabled
-          ? const Icon(Icons.check_circle, color: AppColors.primary, size: 14)
-          : Icon(Icons.cancel, color: Colors.white.withValues(alpha: 0.15), size: 14),
     );
   }
 }

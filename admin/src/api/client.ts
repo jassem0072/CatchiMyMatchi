@@ -1,11 +1,10 @@
 import axios from 'axios';
-
-const TOKEN_KEY = 'admin_token';
+import { clearAuthStorage, readStoredToken } from '../authStorage';
 
 const client = axios.create({ baseURL: '/api' });
 
 client.interceptors.request.use((cfg) => {
-  const token = localStorage.getItem(TOKEN_KEY);
+  const token = readStoredToken();
   if (token && cfg.headers) {
     cfg.headers.Authorization = `Bearer ${token}`;
   }
@@ -16,7 +15,7 @@ client.interceptors.response.use(
   (r) => r,
   (err) => {
     if (err.response?.status === 401) {
-      localStorage.removeItem(TOKEN_KEY);
+      clearAuthStorage();
       window.location.href = '/login';
     }
     return Promise.reject(err);

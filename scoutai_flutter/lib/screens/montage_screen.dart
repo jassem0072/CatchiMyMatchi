@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 import 'package:share_plus/share_plus.dart';
 import 'package:video_player/video_player.dart';
 
+import '../app/scoutai_app.dart';
 import '../services/api_config.dart';
 import '../services/auth_storage.dart';
 import '../theme/app_colors.dart';
@@ -25,8 +26,11 @@ class _MontageScreenState extends State<MontageScreen> {
   String? _playerId;
   String _title = 'Highlight Reel';
 
+  bool _checkingStatus = false;
   bool _generating = false;
   bool _generated = false;
+  bool _existingMontage = false;
+  bool _needsAnalysis = false;
   String? _error;
   int _clipCount = 0;
   double _duration = 0;
@@ -48,6 +52,8 @@ class _MontageScreenState extends State<MontageScreen> {
     } else if (args is String) {
       _videoId = args;
     }
+
+    _checkExistingMontage();
   }
 
   @override
@@ -56,12 +62,55 @@ class _MontageScreenState extends State<MontageScreen> {
     super.dispose();
   }
 
-  Future<void> _generate() async {
+  Future<void> _checkExistingMontage() async {
+    if (_videoId == null) return;
+    setState(() {
+      _checkingStatus = true;
+      _error = null;
+    });
+
+    try {
+      final url = '${ApiConfig.baseUrl}/videos/$_videoId/montage/status';
+      final response = await http.get(Uri.parse(url)).timeout(const Duration(seconds: 25));
+
+      if (!mounted) return;
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body) as Map<String, dynamic>;
+        final exists = data['exists'] == true;
+        setState(() {
+          _checkingStatus = false;
+          _generated = exists;
+          _existingMontage = exists;
+        });
+        if (exists) {
+          _initVideo();
+        }
+      } else {
+        setState(() {
+          _checkingStatus = false;
+          _generated = false;
+          _existingMontage = false;
+        });
+      }
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _checkingStatus = false;
+        _generated = false;
+        _existingMontage = false;
+      });
+    }
+  }
+
+  Future<void> _generate({bool forceRegenerate = false}) async {
     if (_videoId == null) return;
     setState(() {
       _generating = true;
       _error = null;
+      _needsAnalysis = false;
       _generated = false;
+      _existingMontage = false;
       _videoInitialized = false;
       _videoError = false;
     });
@@ -76,9 +125,10 @@ class _MontageScreenState extends State<MontageScreen> {
           if (token != null) 'Authorization': 'Bearer $token',
         },
         body: jsonEncode({
-          if (_playerId != null) 'playerId': _playerId,
+          if ((_playerId ?? '').trim().isNotEmpty) 'playerId': _playerId,
+          if (forceRegenerate) 'forceRegenerate': true,
         }),
-      ).timeout(const Duration(minutes: 6));
+      ).timeout(const Duration(minutes: 35));
 
       if (!mounted) return;
 
@@ -89,14 +139,22 @@ class _MontageScreenState extends State<MontageScreen> {
         setState(() {
           _generating = false;
           _generated = true;
+          _existingMontage = data['alreadyGenerated'] == true;
         });
         _initVideo();
       } else {
         final body = jsonDecode(response.body) as Map<String, dynamic>?;
         final msg = body?['message'] ?? 'Generation failed (${response.statusCode})';
+        final lower = msg.toString().toLowerCase();
         setState(() {
           _generating = false;
           _error = msg.toString();
+          _needsAnalysis = lower.contains('no analysis data found') ||
+              lower.contains('analyse the video first') ||
+              lower.contains('analyse the video first by identifying the player') ||
+              lower.contains('please analyse') ||
+              lower.contains('player selection') ||
+              lower.contains('identifying the player');
         });
       }
     } catch (e) {
@@ -104,8 +162,17 @@ class _MontageScreenState extends State<MontageScreen> {
       setState(() {
         _generating = false;
         _error = 'Error: $e';
+        _needsAnalysis = false;
       });
     }
+  }
+
+  void _goToAnalyzeFirst() {
+    if (_videoId == null) return;
+    Navigator.of(context).pushNamed(
+      AppRoutes.identifyPlayer,
+      arguments: _videoId,
+    );
   }
 
   Future<void> _initVideo() async {
@@ -184,6 +251,12 @@ class _MontageScreenState extends State<MontageScreen> {
       body: ListView(
         padding: const EdgeInsets.fromLTRB(18, 16, 18, 32),
         children: [
+          if (_checkingStatus)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 24),
+              child: Center(child: CircularProgressIndicator()),
+            ),
+
           // ── Header Card ──
           GlassCard(
             child: Column(
@@ -231,9 +304,13 @@ class _MontageScreenState extends State<MontageScreen> {
                   ],
                 ),
                 const SizedBox(height: 14),
-                const Text(
-                  'Automatically detects and clips your best sprint moments and acceleration peaks from the video analysis.',
-                  style: TextStyle(
+                Text(
+                  _generated
+                      ? (_existingMontage
+                          ? 'Existing montage detected for this video. You can watch it now or regenerate it from the latest analysis.'
+                          : 'Your montage is ready. You can watch, copy, or share it now.')
+                      : 'No montage detected yet. Generate one from your analysis highlights.',
+                  style: const TextStyle(
                     color: AppColors.textMuted,
                     fontSize: 12,
                     height: 1.5,
@@ -338,10 +415,36 @@ class _MontageScreenState extends State<MontageScreen> {
                     ),
                     const SizedBox(height: 6),
                     const Text(
-                      'This may take a moment depending on video length.',
+                      'AI is tracking the player and finding all ball-touch moments. This may take 15–30 minutes for a full match.',
                       style:
                           TextStyle(color: AppColors.textMuted, fontSize: 12),
                       textAlign: TextAlign.center,
+                    ),
+                  ],
+                ),
+              )
+              else if (_needsAnalysis)
+              GlassCard(
+                child: Column(
+                  children: [
+                    const Icon(Icons.info_outline, color: AppColors.textMuted),
+                    const SizedBox(height: 10),
+                    const Text(
+                      'Please analyze the selected player first, then generate the montage.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: AppColors.textMuted),
+                    ),
+                    const SizedBox(height: 10),
+                    FilledButton.icon(
+                      onPressed: _goToAnalyzeFirst,
+                      icon: const Icon(Icons.person_search, size: 18),
+                      label: const Text('Identify Player & Analyse First'),
+                    ),
+                    const SizedBox(height: 8),
+                    OutlinedButton.icon(
+                      onPressed: (_videoId != null && !_checkingStatus) ? () => _generate() : null,
+                      icon: const Icon(Icons.refresh, size: 18),
+                      label: const Text('Retry Generation'),
                     ),
                   ],
                 ),
@@ -350,7 +453,9 @@ class _MontageScreenState extends State<MontageScreen> {
               SizedBox(
                 width: double.infinity,
                 child: FilledButton.icon(
-                  onPressed: _videoId != null ? _generate : null,
+                  onPressed: (_videoId != null && !_checkingStatus)
+                      ? () => _generate()
+                      : null,
                   icon: const Icon(Icons.auto_awesome, size: 20),
                   label: Text(
                     _error != null ? 'Retry Generation' : 'Generate Highlight Reel',
@@ -373,7 +478,7 @@ class _MontageScreenState extends State<MontageScreen> {
             SizedBox(
               width: double.infinity,
               child: OutlinedButton.icon(
-                onPressed: _generating ? null : _generate,
+                onPressed: _generating ? null : () => _generate(forceRegenerate: true),
                 icon: const Icon(Icons.refresh, size: 18),
                 label: const Text('Regenerate'),
                 style: OutlinedButton.styleFrom(

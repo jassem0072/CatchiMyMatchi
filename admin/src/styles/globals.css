@@ -20,6 +20,71 @@
   --shadow-card: 0 2px 16px rgba(0,0,0,0.35);
 }
 
+@keyframes uiRevealUp {
+  from {
+    opacity: 0;
+    transform: translateY(14px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.ui-reveal {
+  animation: uiRevealUp 520ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.ui-delay-1 {
+  animation-delay: 90ms;
+}
+
+.ui-delay-2 {
+  animation-delay: 170ms;
+}
+
+.ui-input,
+.ui-select {
+  height: 46px;
+  border-radius: var(--radius-input);
+  border: 1px solid rgba(39, 49, 74, 0.92);
+  background: linear-gradient(180deg, rgba(15, 23, 38, 0.98), rgba(11, 18, 32, 0.98));
+  color: var(--color-text);
+  padding: 0 14px;
+  font-size: 15px;
+  font-weight: 600;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
+}
+
+.ui-input::placeholder {
+  color: #6f819f;
+  font-weight: 500;
+}
+
+.ui-input:focus,
+.ui-select:focus {
+  border-color: rgba(29, 99, 255, 0.8);
+  box-shadow: 0 0 0 3px rgba(29, 99, 255, 0.18);
+  transform: translateY(-1px);
+}
+
+.billing-row {
+  transition: background 0.2s ease, transform 0.2s ease;
+}
+
+.billing-row:hover {
+  background: rgba(29, 99, 255, 0.08);
+  transform: translateX(2px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ui-reveal,
+  .billing-row {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+
 /* ── Reset ── */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 

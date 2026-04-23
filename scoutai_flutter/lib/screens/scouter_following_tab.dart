@@ -11,6 +11,7 @@ import '../theme/app_colors.dart';
 import '../widgets/common.dart';
 import '../widgets/country_picker.dart';
 import '../widgets/fifa_card_stats.dart';
+import '../widgets/list_paginator.dart';
 import '../widgets/simple_player_card.dart';
 
 const _kFollowingPositions = [
@@ -28,10 +29,13 @@ class ScouterFollowingTab extends StatefulWidget {
 }
 
 class _ScouterFollowingTabState extends State<ScouterFollowingTab> {
+  static const int _playersPerPage = 4;
+
   bool _loading = true;
   String? _error;
   List<Map<String, dynamic>> _favorites = [];
   String _search = '';
+  int _currentPage = 1;
 
   // ── Filter state ──
   int? _minAge;
@@ -84,7 +88,11 @@ class _ScouterFollowingTabState extends State<ScouterFollowingTab> {
           .toList();
 
       if (!mounted) return;
-      setState(() { _favorites = players; _loading = false; });
+      setState(() {
+        _favorites = players;
+        _currentPage = 1;
+        _loading = false;
+      });
     } catch (e) {
       if (!mounted) return;
       setState(() { _error = e.toString().replaceFirst('Exception: ', ''); _loading = false; });
@@ -122,6 +130,7 @@ class _ScouterFollowingTabState extends State<ScouterFollowingTab> {
       _filterCountry = null; _filterPosition = null;
       _minOvr = null; _maxOvr = null;
       _minHeight = null; _maxHeight = null;
+      _currentPage = 1;
     });
     _minAgeCtrl.clear(); _maxAgeCtrl.clear();
     _minOvrCtrl.clear(); _maxOvrCtrl.clear();
@@ -158,6 +167,13 @@ class _ScouterFollowingTabState extends State<ScouterFollowingTab> {
     }).toList();
   }
 
+  List<Map<String, dynamic>> _pagePlayers(List<Map<String, dynamic>> players, int page) {
+    final start = (page - 1) * _playersPerPage;
+    if (start >= players.length) return const [];
+    final end = (start + _playersPerPage).clamp(0, players.length);
+    return players.sublist(start, end);
+  }
+
   void _openFilterSheet() {
     showModalBottomSheet(
       context: context,
@@ -179,6 +195,7 @@ class _ScouterFollowingTabState extends State<ScouterFollowingTab> {
             _filterCountry = country; _filterPosition = position;
             _minOvr = minOvr; _maxOvr = maxOvr;
             _minHeight = minHeight; _maxHeight = maxHeight;
+            _currentPage = 1;
           });
         },
         onClear: _clearFilters,
@@ -235,6 +252,9 @@ class _ScouterFollowingTabState extends State<ScouterFollowingTab> {
     }
 
     final players = _filteredFavorites;
+  final totalPages = (players.length / _playersPerPage).ceil().clamp(1, 999999);
+  final activePage = _currentPage.clamp(1, totalPages);
+  final pagePlayers = _pagePlayers(players, activePage);
 
     return RefreshIndicator(
       onRefresh: _load,
@@ -256,7 +276,10 @@ class _ScouterFollowingTabState extends State<ScouterFollowingTab> {
             children: [
               Expanded(
                 child: TextField(
-                  onChanged: (v) => setState(() => _search = v),
+                  onChanged: (v) => setState(() {
+                    _search = v;
+                    _currentPage = 1;
+                  }),
                   decoration: InputDecoration(
                     hintText: S.of(context).searchByNamePositionNation,
                     prefixIcon: const Icon(Icons.search),
@@ -353,10 +376,11 @@ class _ScouterFollowingTabState extends State<ScouterFollowingTab> {
                 mainAxisSpacing: 12,
                 childAspectRatio: 0.62,
               ),
-              itemCount: players.length,
+              itemCount: pagePlayers.length,
               itemBuilder: (ctx, i) {
-                final player = players[i];
+                final player = pagePlayers[i];
                 return _FollowingCardTile(
+                  key: ValueKey((player['_id'] ?? player['id'])?.toString() ?? 'fav-$i'),
                   player: player,
                   onRemove: () => _removeFavorite((player['_id'] ?? player['id'])?.toString() ?? ''),
                   onTap: () {
@@ -368,6 +392,15 @@ class _ScouterFollowingTabState extends State<ScouterFollowingTab> {
                 );
               },
             ),
+          if (players.isNotEmpty) ...[
+            const SizedBox(height: 14),
+            ListPaginator(
+              totalItems: players.length,
+              itemsPerPage: _playersPerPage,
+              currentPage: activePage,
+              onPageChanged: (page) => setState(() => _currentPage = page),
+            ),
+          ],
         ],
       ),
     );
@@ -376,6 +409,7 @@ class _ScouterFollowingTabState extends State<ScouterFollowingTab> {
 
 class _FollowingCardTile extends StatefulWidget {
   const _FollowingCardTile({
+    super.key,
     required this.player,
     required this.onRemove,
     required this.onTap,
@@ -392,6 +426,7 @@ class _FollowingCardTile extends StatefulWidget {
 class _FollowingCardTileState extends State<_FollowingCardTile> {
   Uint8List? _portrait;
   FifaCardStats _stats = FifaCardStats.empty;
+  String _boundPlayerId = '';
 
   @override
   void initState() {
@@ -399,9 +434,23 @@ class _FollowingCardTileState extends State<_FollowingCardTile> {
     _loadData();
   }
 
+  @override
+  void didUpdateWidget(covariant _FollowingCardTile oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final oldId = (oldWidget.player['_id'] ?? oldWidget.player['id'])?.toString() ?? '';
+    final newId = (widget.player['_id'] ?? widget.player['id'])?.toString() ?? '';
+    if (oldId != newId) {
+      _portrait = null;
+      _stats = FifaCardStats.empty;
+      _boundPlayerId = '';
+      _loadData();
+    }
+  }
+
   Future<void> _loadData() async {
     final id = (widget.player['_id'] ?? widget.player['id'])?.toString() ?? '';
     if (id.isEmpty) return;
+    _boundPlayerId = id;
     final token = await AuthStorage.loadToken();
     if (token == null || !mounted) return;
 
@@ -416,7 +465,7 @@ class _FollowingCardTileState extends State<_FollowingCardTile> {
 
     try {
       final results = await Future.wait([portraitFuture, dashboardFuture]);
-      if (!mounted) return;
+      if (!mounted || _boundPlayerId != id) return;
 
       final pRes = results[0];
       if (pRes.statusCode >= 400 && pRes.statusCode != 204) {
@@ -467,7 +516,6 @@ class _FollowingCardTileState extends State<_FollowingCardTile> {
   Widget build(BuildContext context) {
     final name = (widget.player['displayName'] ?? widget.player['email'] ?? 'Player').toString();
     final position = (widget.player['position'] ?? '').toString();
-    final nation = (widget.player['nation'] ?? '').toString();
 
     return Stack(
         children: [
@@ -476,6 +524,7 @@ class _FollowingCardTileState extends State<_FollowingCardTile> {
             stats: _stats,
             position: position.isNotEmpty ? position : '?',
             portraitBytes: _portrait,
+            isVerified: widget.player['badgeVerified'] == true,
             onTap: widget.onTap,
           ),
           // Remove favorite button overlay

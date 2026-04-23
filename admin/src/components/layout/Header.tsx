@@ -1,8 +1,10 @@
 import { useLocation } from 'react-router-dom';
+import { useAuth } from '../../context/AuthContext';
 
 const PAGE_TITLES: Record<string, string> = {
   '/dashboard':     'Dashboard',
   '/users':         'User Management',
+  '/profile':       'My Profile',
   '/videos':        'Video Management',
   '/reports':       'Reports',
   '/notifications': 'Notifications',
@@ -10,6 +12,7 @@ const PAGE_TITLES: Record<string, string> = {
 
 export function Header() {
   const { pathname } = useLocation();
+  const { role } = useAuth();
   const title = PAGE_TITLES[pathname] || 'Admin Panel';
 
   return (
@@ -43,7 +46,7 @@ export function Header() {
           color: 'var(--color-accent)',
         }}
       >
-        ⚡ Admin
+        ⚡ {role === 'expert' ? 'Expert' : 'Admin'}
       </div>
     </header>
   );

@@ -1,5 +1,5 @@
 export type RequestUser = {
   sub: string;
   email: string;
-  role: 'player' | 'scouter' | 'admin';
+  role: 'player' | 'scouter' | 'admin' | 'expert';
 };

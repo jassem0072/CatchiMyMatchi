@@ -1,5 +1,4 @@
 import 'dart:typed_data';
-import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
@@ -34,6 +33,31 @@ class ShareService {
     double? directionChanges,
     Map<String, dynamic>? movementZones,
     bool isCalibrated = false,
+    // ── Player profile details ──
+    String? profileEmail,
+    String? profileNation,
+    int? profileAge,
+    int? profileHeightCm,
+    String? profileTier,
+    bool? profileBadgeVerified,
+    // ── Home dashboard summary ──
+    int? totalVideos,
+    int? matchesAnalyzed,
+    double? totalDistanceKm,
+    double? avgDistanceKm,
+    double? avgSpeedKmhOverall,
+    int? totalSprintsOverall,
+    int? totalAccelPeaksOverall,
+    double? bestDistanceKm,
+    double? bestAvgSpeedKmh,
+    int? bestSprints,
+    int? calibratedCount,
+    int? uncalibratedCount,
+    // ── Home dashboard movement/intensity (aggregated) ──
+    Map<String, dynamic>? dashboardMovementZones,
+    double? dashboardWorkRate,
+    double? dashboardMovingRatio,
+    double? dashboardDirectionChanges,
   }) async {
     final pdf = pw.Document();
 
@@ -188,6 +212,11 @@ class ShareService {
         pageFormat: PdfPageFormat.a4,
         margin: const pw.EdgeInsets.all(32),
         build: (ctx) {
+          final zonesForReport = dashboardMovementZones ?? movementZones;
+          final workRateForReport = dashboardWorkRate ?? workRate;
+          final movingRatioForReport = dashboardMovingRatio ?? movingRatio;
+          final dirChangesForReport = dashboardDirectionChanges ?? directionChanges;
+
           final children = <pw.Widget>[
             // ── Header ──
             pw.Row(
@@ -243,7 +272,7 @@ class ShareService {
           }
 
           // ── Movement Zones ──
-          if (movementZones != null) {
+          if (zonesForReport != null) {
             children.addAll([
               pw.Text(
                 'MOVEMENT ZONES',
@@ -255,12 +284,127 @@ class ShareService {
                 ),
               ),
               pw.SizedBox(height: 8),
-              _pdfMovementZonesBar(movementZones),
+              _pdfMovementZonesBar(zonesForReport),
               pw.SizedBox(height: 16),
               pw.Divider(color: PdfColors.grey300),
               pw.SizedBox(height: 16),
             ]);
           }
+
+          if (workRateForReport != null || movingRatioForReport != null || dirChangesForReport != null) {
+            children.addAll([
+              pw.Text(
+                'WORK RATE & INTENSITY',
+                style: pw.TextStyle(
+                  fontSize: 11,
+                  fontWeight: pw.FontWeight.bold,
+                  color: PdfColor.fromHex('#1D63FF'),
+                  letterSpacing: 1.5,
+                ),
+              ),
+              pw.SizedBox(height: 8),
+              pw.Row(
+                children: [
+                  if (workRateForReport != null) ...[
+                    _pdfMetricBox('Work Rate', '${workRateForReport.toStringAsFixed(0)} m/min'),
+                    pw.SizedBox(width: 8),
+                  ],
+                  if (movingRatioForReport != null) ...[
+                    _pdfMetricBox('Activity', '${(movingRatioForReport * 100).toStringAsFixed(0)}%'),
+                    pw.SizedBox(width: 8),
+                  ],
+                  if (dirChangesForReport != null)
+                    _pdfMetricBox('Dir. Changes', '${dirChangesForReport.toStringAsFixed(1)}/min'),
+                ],
+              ),
+              pw.SizedBox(height: 16),
+              pw.Divider(color: PdfColors.grey300),
+              pw.SizedBox(height: 16),
+            ]);
+          }
+
+          // ── Player profile block ──
+          children.addAll([
+            pw.Text(
+              'PLAYER PROFILE',
+              style: pw.TextStyle(
+                fontSize: 11,
+                fontWeight: pw.FontWeight.bold,
+                color: PdfColor.fromHex('#1D63FF'),
+                letterSpacing: 1.5,
+              ),
+            ),
+            pw.SizedBox(height: 8),
+            _pdfProfileGrid(
+              email: profileEmail,
+              nation: profileNation,
+              age: profileAge,
+              heightCm: profileHeightCm,
+              tier: profileTier,
+              badgeVerified: profileBadgeVerified,
+            ),
+            pw.SizedBox(height: 14),
+            pw.Divider(color: PdfColors.grey300),
+            pw.SizedBox(height: 14),
+          ]);
+
+          // ── Home KPI summary block ──
+          children.addAll([
+            pw.Text(
+              'HOME DASHBOARD SUMMARY',
+              style: pw.TextStyle(
+                fontSize: 11,
+                fontWeight: pw.FontWeight.bold,
+                color: PdfColor.fromHex('#1D63FF'),
+                letterSpacing: 1.5,
+              ),
+            ),
+            pw.SizedBox(height: 8),
+            _pdfSummaryGrid([
+              ('Videos', '${totalVideos ?? 0}'),
+              ('Analyzed', '${matchesAnalyzed ?? 0}'),
+              ('Total Dist', '${(totalDistanceKm ?? 0).toStringAsFixed(2)} km'),
+              ('Avg Dist', '${(avgDistanceKm ?? 0).toStringAsFixed(2)} km'),
+              ('Avg Speed', '${(avgSpeedKmhOverall ?? 0).toStringAsFixed(1)} km/h'),
+              ('Total Sprints', '${totalSprintsOverall ?? 0}'),
+              ('Accel Peaks', '${totalAccelPeaksOverall ?? 0}'),
+              ('Best Dist', '${(bestDistanceKm ?? 0).toStringAsFixed(2)} km'),
+              ('Best Avg Speed', '${(bestAvgSpeedKmh ?? 0).toStringAsFixed(1)} km/h'),
+              ('Best Sprints', '${bestSprints ?? 0}'),
+            ]),
+            pw.SizedBox(height: 14),
+          ]);
+
+          // ── Data quality block ──
+          final cal = calibratedCount ?? (isCalibrated ? 1 : 0);
+          final uncal = uncalibratedCount ?? (isCalibrated ? 0 : 1);
+          final totalQuality = cal + uncal;
+          final qualityLabel = totalQuality > 0
+              ? 'Calibrated analyses: $cal / $totalQuality'
+              : (isCalibrated ? 'Calibrated analysis' : 'Uncalibrated analysis');
+          children.addAll([
+            pw.Container(
+              padding: const pw.EdgeInsets.all(10),
+              decoration: pw.BoxDecoration(
+                color: uncal > 0 ? PdfColor.fromHex('#FFF8E1') : PdfColor.fromHex('#ECFDF3'),
+                borderRadius: const pw.BorderRadius.all(pw.Radius.circular(6)),
+                border: pw.Border.all(
+                  color: uncal > 0 ? PdfColor.fromHex('#FFB300') : PdfColor.fromHex('#23A26D'),
+                ),
+              ),
+              child: pw.Text(
+                qualityLabel,
+                style: pw.TextStyle(
+                  fontSize: 10,
+                  fontWeight: pw.FontWeight.bold,
+                  color: uncal > 0 ? PdfColor.fromHex('#A15C00') : PdfColor.fromHex('#166D4B'),
+                ),
+              ),
+            ),
+            pw.SizedBox(height: 14),
+            pw.Divider(color: PdfColors.grey300),
+            pw.SizedBox(height: 14),
+          ]);
 
           // ── Heatmap image ──
           if (heatmapImage != null) {
@@ -453,6 +597,83 @@ class ShareService {
         ),
       ),
     );
+  }
+
+  static pw.Widget _pdfProfileGrid({
+    String? email,
+    String? nation,
+    int? age,
+    int? heightCm,
+    String? tier,
+    bool? badgeVerified,
+  }) {
+    final rows = [
+      ('Email', _fallbackText(email)),
+      ('Nation', _fallbackText(nation)),
+      ('Age', age != null && age > 0 ? '$age' : 'N/A'),
+      ('Height', heightCm != null && heightCm > 0 ? '$heightCm cm' : 'N/A'),
+      ('Plan', _fallbackText(tier)),
+      ('Badge', badgeVerified == true ? 'Verified' : 'Not verified'),
+    ];
+
+    return pw.Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: rows
+          .map(
+            (e) => pw.Container(
+              width: 160,
+              padding: const pw.EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+              decoration: pw.BoxDecoration(
+                color: PdfColor.fromHex('#F7F9FF'),
+                border: pw.Border.all(color: PdfColor.fromHex('#DCE4FF')),
+                borderRadius: const pw.BorderRadius.all(pw.Radius.circular(5)),
+              ),
+              child: pw.Column(
+                crossAxisAlignment: pw.CrossAxisAlignment.start,
+                children: [
+                  pw.Text(e.$1.toUpperCase(), style: const pw.TextStyle(fontSize: 7, color: PdfColors.grey600)),
+                  pw.SizedBox(height: 2),
+                  pw.Text(e.$2, style: pw.TextStyle(fontSize: 10, fontWeight: pw.FontWeight.bold)),
+                ],
+              ),
+            ),
+          )
+          .toList(),
+    );
+  }
+
+  static pw.Widget _pdfSummaryGrid(List<(String, String)> items) {
+    return pw.Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: items
+          .map(
+            (e) => pw.Container(
+              width: 120,
+              padding: const pw.EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+              decoration: pw.BoxDecoration(
+                color: PdfColor.fromHex('#F0F4FF'),
+                border: pw.Border.all(color: PdfColor.fromHex('#D0DBFF')),
+                borderRadius: const pw.BorderRadius.all(pw.Radius.circular(5)),
+              ),
+              child: pw.Column(
+                crossAxisAlignment: pw.CrossAxisAlignment.start,
+                children: [
+                  pw.Text(e.$1.toUpperCase(), style: const pw.TextStyle(fontSize: 7, color: PdfColors.grey600)),
+                  pw.SizedBox(height: 2),
+                  pw.Text(e.$2, style: pw.TextStyle(fontSize: 10, fontWeight: pw.FontWeight.bold)),
+                ],
+              ),
+            ),
+          )
+          .toList(),
+    );
+  }
+
+  static String _fallbackText(String? v) {
+    if (v == null || v.trim().isEmpty) return 'N/A';
+    return v.trim();
   }
 
   /// Draws movement zones as a stacked horizontal bar with legend.

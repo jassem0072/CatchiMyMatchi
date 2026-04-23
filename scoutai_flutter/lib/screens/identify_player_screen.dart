@@ -122,6 +122,9 @@ class _IdentifyPlayerScreenState extends State<IdentifyPlayerScreen> {
       'y': (sel.top * videoH).round(),
       'w': (sel.width * videoW).round(),
       'h': (sel.height * videoH).round(),
+      // Normalized center position (0–1) for YOLO-based ball-tracking montage
+      'normX': (sel.left + sel.width / 2).clamp(0.0, 1.0),
+      'normY': (sel.top + sel.height / 2).clamp(0.0, 1.0),
     };
 
     Navigator.of(context).pushNamed(

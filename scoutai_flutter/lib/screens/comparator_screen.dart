@@ -1,40 +1,54 @@
-import 'dart:convert';
 import 'dart:math' as math;
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import '../features/comparator/models/comparator_player.dart';
+import '../features/comparator/models/comparator_result.dart';
+import '../features/comparator/providers/comparator_providers.dart';
 
 import '../services/api_config.dart';
 import '../services/auth_storage.dart';
+import '../services/gemini_service.dart';
 import '../services/translations.dart';
 import '../theme/app_colors.dart';
 import '../widgets/common.dart';
+import '../widgets/list_paginator.dart';
 
 /// Comparator screen — select two players and compare their AI‑analysed
 /// football performance metrics side by side (radar chart, bar stats, AI insights).
-class ComparatorScreen extends StatefulWidget {
+class ComparatorScreen extends ConsumerStatefulWidget {
   const ComparatorScreen({super.key});
 
   @override
-  State<ComparatorScreen> createState() => _ComparatorScreenState();
+  ConsumerState<ComparatorScreen> createState() => _ComparatorScreenState();
 }
 
-class _ComparatorScreenState extends State<ComparatorScreen> {
+class _ComparatorScreenState extends ConsumerState<ComparatorScreen> {
   // ── Player selection ──
-  Map<String, dynamic>? _playerA;
-  Map<String, dynamic>? _playerB;
+  ComparatorPlayer? _playerA;
+  ComparatorPlayer? _playerB;
+  Uint8List? _portraitA;
+  Uint8List? _portraitB;
 
   // ── Comparison result ──
   bool _loading = false;
   String? _error;
-  Map<String, dynamic>? _result; // full compare response
+  ComparatorResult? _result;
+  String? _recommendedPlayerId;
+  int _winsA = 0;
+  int _winsB = 0;
+
+  // ── Gemini insight ──
+  final GeminiService _gemini = GeminiService();
+  bool _geminiLoading = false;
+  String? _geminiInsight;
 
   // ── Helpers ──
-  String _name(Map<String, dynamic>? p) =>
-      (p?['displayName'] ?? p?['email'] ?? 'Player').toString();
+  String _name(ComparatorPlayer? p) => p?.displayName ?? 'Player';
 
-  String _id(Map<String, dynamic> p) =>
-      (p['_id'] ?? p['id'])?.toString() ?? '';
+  String _id(ComparatorPlayer p) => p.id;
 
   // ────────────────────────── API calls ──────────────────────────
 
@@ -45,28 +59,22 @@ class _ComparatorScreenState extends State<ComparatorScreen> {
       _error = null;
       _result = null;
     });
-    final token = await AuthStorage.loadToken();
-    if (!mounted || token == null) return;
     try {
-      final uri = Uri.parse('${ApiConfig.baseUrl}/players/compare');
-      final res = await http.post(
-        uri,
-        headers: {
-          'Authorization': 'Bearer $token',
-          'Content-Type': 'application/json',
-        },
-        body: jsonEncode({
-          'playerIdA': _id(_playerA!),
-          'playerIdB': _id(_playerB!),
-        }),
+      final compareResult = await ref.read(comparatorServiceProvider).comparePlayers(
+        playerIdA: _id(_playerA!),
+        playerIdB: _id(_playerB!),
       );
-      if (res.statusCode >= 400) throw Exception('Compare failed (${res.statusCode})');
-      final data = jsonDecode(res.body);
       if (!mounted) return;
       setState(() {
-        _result = data is Map<String, dynamic> ? data : null;
+        _result = compareResult;
+        _geminiInsight = null;
+        _recommendedPlayerId = null;
+        _winsA = 0;
+        _winsB = 0;
         _loading = false;
       });
+      _computeRecommendation();
+      _generateGeminiInsight();
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -81,16 +89,10 @@ class _ComparatorScreenState extends State<ComparatorScreen> {
   Future<void> _pickPlayer(bool isSlotA) async {
     final token = await AuthStorage.loadToken();
     if (token == null) return;
-    final uri = Uri.parse('${ApiConfig.baseUrl}/players');
-    final res = await http.get(uri, headers: {'Authorization': 'Bearer $token'});
-    if (res.statusCode >= 400) return;
-    final list = (jsonDecode(res.body) as List)
-        .whereType<Map>()
-        .map((m) => Map<String, dynamic>.from(m))
-        .toList();
+    final list = await ref.read(comparatorServiceProvider).getPlayers();
 
     if (!mounted) return;
-    final picked = await showModalBottomSheet<Map<String, dynamic>>(
+    final picked = await showModalBottomSheet<ComparatorPlayer>(
       context: context,
       isScrollControlled: true,
       backgroundColor: AppColors.surf(context),
@@ -99,7 +101,8 @@ class _ComparatorScreenState extends State<ComparatorScreen> {
       ),
       builder: (_) => _PlayerPickerSheet(
         players: list,
-        excludeId: isSlotA ? _id(_playerB ?? {}) : _id(_playerA ?? {}),
+        excludeId: isSlotA ? (_playerB?.id ?? '') : (_playerA?.id ?? ''),
+        authToken: token,
       ),
     );
     if (picked == null || !mounted) return;
@@ -110,7 +113,125 @@ class _ComparatorScreenState extends State<ComparatorScreen> {
         _playerB = picked;
       }
       _result = null; // reset comparison when selection changes
+      _recommendedPlayerId = null;
+      _winsA = 0;
+      _winsB = 0;
+      _geminiInsight = null;
     });
+    _loadPortraitForPicked(isSlotA, picked);
+  }
+
+  Future<void> _loadPortraitForPicked(bool isSlotA, ComparatorPlayer player) async {
+    final pid = _id(player);
+    if (pid.isEmpty) return;
+    try {
+      final bytes = await ref.read(comparatorServiceProvider).getPlayerPortrait(pid);
+      if (!mounted) return;
+      setState(() {
+        if (isSlotA) {
+          _portraitA = bytes;
+        } else {
+          _portraitB = bytes;
+        }
+      });
+    } catch (_) {}
+  }
+
+  void _computeRecommendation() {
+    if (_result == null || _playerA == null || _playerB == null) return;
+    final aggA = _result!.playerA.aggregated;
+    final aggB = _result!.playerB.aggregated;
+
+    int wa = 0;
+    int wb = 0;
+    void eval(double va, double vb) {
+      if (va > vb) wa++;
+      if (vb > va) wb++;
+    }
+
+    eval(aggA.totalDistanceMeters, aggB.totalDistanceMeters);
+    eval(aggA.avgSpeedKmh, aggB.avgSpeedKmh);
+    eval(aggA.maxSpeedKmh, aggB.maxSpeedKmh);
+    eval(aggA.totalSprints, aggB.totalSprints);
+    eval(aggA.totalAccelPeaks, aggB.totalAccelPeaks);
+
+    setState(() {
+      _winsA = wa;
+      _winsB = wb;
+      if (wa > wb) {
+        _recommendedPlayerId = _id(_playerA!);
+      } else if (wb > wa) {
+        _recommendedPlayerId = _id(_playerB!);
+      } else {
+        _recommendedPlayerId = null;
+      }
+    });
+  }
+
+  Future<void> _generateGeminiInsight() async {
+    if (_result == null || _playerA == null || _playerB == null) return;
+    final aggA = _result!.playerA.aggregated;
+    final aggB = _result!.playerB.aggregated;
+
+    setState(() => _geminiLoading = true);
+    final nameA = _name(_playerA);
+    final nameB = _name(_playerB);
+    final recommended = _recommendedPlayerId == _id(_playerA!)
+        ? nameA
+        : (_recommendedPlayerId == _id(_playerB!) ? nameB : 'No clear winner');
+
+    try {
+      _gemini.startSession(
+        playerStats: {
+          'position': _playerA?.position ?? 'CM',
+          'ovr': 80,
+          'pac': 80,
+          'sho': 80,
+          'pas': 80,
+          'dri': 80,
+          'def': 80,
+          'phy': 80,
+          'maxSpeedKmh': aggA.maxSpeedKmh,
+          'avgSpeedKmh': aggA.avgSpeedKmh,
+          'distanceKm': aggA.totalDistanceMeters / 1000,
+          'sprints': aggA.totalSprints.round(),
+          'trackingPoints': aggA.analyzedVideos.round(),
+        },
+      );
+
+      final prompt = '''
+Compare these two players based on AI metrics and write a concise scouting note.
+Player A: $nameA
+- Distance: ${aggA.totalDistanceMeters.toStringAsFixed(0)} m
+- Avg speed: ${aggA.avgSpeedKmh.toStringAsFixed(1)} km/h
+- Max speed: ${aggA.maxSpeedKmh.toStringAsFixed(1)} km/h
+- Sprints: ${aggA.totalSprints.toStringAsFixed(0)}
+- Accel peaks: ${aggA.totalAccelPeaks.toStringAsFixed(0)}
+
+Player B: $nameB
+- Distance: ${aggB.totalDistanceMeters.toStringAsFixed(0)} m
+- Avg speed: ${aggB.avgSpeedKmh.toStringAsFixed(1)} km/h
+- Max speed: ${aggB.maxSpeedKmh.toStringAsFixed(1)} km/h
+- Sprints: ${aggB.totalSprints.toStringAsFixed(0)}
+- Accel peaks: ${aggB.totalAccelPeaks.toStringAsFixed(0)}
+
+Required format:
+1) "$nameA is better at ..."
+2) "$nameB is better at ..."
+3) "Recommended player: ..." (current recommended = $recommended)
+Keep it under 140 words.
+''';
+
+      final ai = await _gemini.sendMessage(prompt);
+      if (!mounted) return;
+      setState(() {
+        _geminiInsight = ai;
+        _geminiLoading = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _geminiLoading = false);
+    }
   }
 
   // ────────────────────────── Build ──────────────────────────
@@ -152,7 +273,11 @@ class _ComparatorScreenState extends State<ComparatorScreen> {
                 child: _PlayerSlotCard(
                   label: S.of(context).player1,
                   player: _playerA,
+                  portraitBytes: _portraitA,
                   color: const Color(0xFF1D63FF),
+                  recommended: (_recommendedPlayerId?.isNotEmpty ?? false) &&
+                      _playerA != null &&
+                      _recommendedPlayerId == _id(_playerA!),
                   onSelect: () => _pickPlayer(true),
                 ),
               ),
@@ -167,7 +292,11 @@ class _ComparatorScreenState extends State<ComparatorScreen> {
                 child: _PlayerSlotCard(
                   label: S.of(context).player2,
                   player: _playerB,
+                  portraitBytes: _portraitB,
                   color: const Color(0xFFB7F408),
+                  recommended: (_recommendedPlayerId?.isNotEmpty ?? false) &&
+                      _playerB != null &&
+                      _recommendedPlayerId == _id(_playerB!),
                   onSelect: () => _pickPlayer(false),
                 ),
               ),
@@ -209,10 +338,10 @@ class _ComparatorScreenState extends State<ComparatorScreen> {
   // ────────────────────────── Comparison results ──────────────────────────
 
   List<Widget> _buildResults() {
-    final a = _result!['playerA'] as Map<String, dynamic>;
-    final b = _result!['playerB'] as Map<String, dynamic>;
-    final aggA = a['aggregated'] as Map<String, dynamic>;
-    final aggB = b['aggregated'] as Map<String, dynamic>;
+    final a = _result!.playerA;
+    final b = _result!.playerB;
+    final aggA = a.aggregated.toJson();
+    final aggB = b.aggregated.toJson();
 
     return [
       const SizedBox(height: 28),
@@ -302,6 +431,13 @@ class _ComparatorScreenState extends State<ComparatorScreen> {
         nameB: _name(_playerB),
         aggA: aggA,
         aggB: aggB,
+        winsA: _winsA,
+        winsB: _winsB,
+        geminiInsight: _geminiInsight,
+        geminiLoading: _geminiLoading,
+        recommendedName: _recommendedPlayerId == _playerA?.id
+            ? _name(_playerA)
+          : (_recommendedPlayerId == _playerB?.id ? _name(_playerB) : null),
       ),
       const SizedBox(height: 20),
 
@@ -309,8 +445,8 @@ class _ComparatorScreenState extends State<ComparatorScreen> {
       _VideoBreakdown(
         titleA: _name(_playerA),
         titleB: _name(_playerB),
-        videosA: (a['videos'] as List?) ?? [],
-        videosB: (b['videos'] as List?) ?? [],
+        videosA: a.videos.map((v) => v.toJson()).toList(),
+        videosB: b.videos.map((v) => v.toJson()).toList(),
       ),
     ];
   }
@@ -330,25 +466,32 @@ class _PlayerSlotCard extends StatelessWidget {
   const _PlayerSlotCard({
     required this.label,
     required this.player,
+    required this.portraitBytes,
     required this.color,
+    required this.recommended,
     required this.onSelect,
   });
 
   final String label;
-  final Map<String, dynamic>? player;
+  final ComparatorPlayer? player;
+  final Uint8List? portraitBytes;
   final Color color;
+  final bool recommended;
   final VoidCallback onSelect;
 
   @override
   Widget build(BuildContext context) {
-    final name = (player?['displayName'] ?? player?['email'])?.toString();
-    final position = (player?['position'] ?? '').toString();
+    final name = player?.displayName;
+    final position = player?.position ?? '';
 
     return GlassCard(
       padding: const EdgeInsets.all(14),
       child: Column(
         children: [
-          Container(
+          Stack(
+            clipBehavior: Clip.none,
+            children: [
+              Container(
             height: 56,
             width: 56,
             decoration: BoxDecoration(
@@ -358,6 +501,15 @@ class _PlayerSlotCard extends StatelessWidget {
             ),
             child: player == null
                 ? Icon(Icons.person_add, color: color, size: 26)
+                : portraitBytes != null
+                    ? ClipOval(
+                        child: Image.memory(
+                          portraitBytes!,
+                          fit: BoxFit.cover,
+                          width: 56,
+                          height: 56,
+                        ),
+                      )
                 : Center(
                     child: Text(
                       (name != null && name.isNotEmpty ? name[0] : '?').toUpperCase(),
@@ -368,7 +520,45 @@ class _PlayerSlotCard extends StatelessWidget {
                     ),
                   ),
           ),
+              if (recommended)
+                Positioned(
+                  right: -6,
+                  top: -6,
+                  child: Container(
+                    padding: const EdgeInsets.all(4),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF16A34A),
+                      shape: BoxShape.circle,
+                      border: Border.all(color: Colors.white, width: 1),
+                    ),
+                    child: const Icon(Icons.check, size: 12, color: Colors.white),
+                  ),
+                ),
+            ],
+          ),
           const SizedBox(height: 8),
+          if (recommended)
+            Container(
+              margin: const EdgeInsets.only(bottom: 6),
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+              decoration: BoxDecoration(
+                color: const Color(0xFF16A34A).withValues(alpha: 0.15),
+                borderRadius: BorderRadius.circular(999),
+                border: Border.all(color: const Color(0xFF16A34A).withValues(alpha: 0.45)),
+              ),
+              child: const Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.star, size: 12, color: Color(0xFF16A34A)),
+                  SizedBox(width: 4),
+                  Text('Recommended',
+                      style: TextStyle(
+                          color: Color(0xFF16A34A),
+                          fontWeight: FontWeight.w800,
+                          fontSize: 10)),
+                ],
+              ),
+            ),
           Text(
             name ?? label,
             overflow: TextOverflow.ellipsis,
@@ -406,31 +596,36 @@ class _PlayerSlotCard extends StatelessWidget {
 // ═══════════════════════════════════════════════════════════════════════════
 
 class _PlayerPickerSheet extends StatefulWidget {
-  const _PlayerPickerSheet({required this.players, required this.excludeId});
+  const _PlayerPickerSheet({
+    required this.players,
+    required this.excludeId,
+    required this.authToken,
+  });
 
-  final List<Map<String, dynamic>> players;
+  final List<ComparatorPlayer> players;
   final String excludeId;
+  final String authToken;
 
   @override
   State<_PlayerPickerSheet> createState() => _PlayerPickerSheetState();
 }
 
 class _PlayerPickerSheetState extends State<_PlayerPickerSheet> {
-  String _search = '';
+  static const int _playersPerPage = 10;
 
-  List<Map<String, dynamic>> get _filtered {
+  String _search = '';
+  int _currentPage = 1;
+
+  List<ComparatorPlayer> get _filtered {
     var list = widget.players;
     if (widget.excludeId.isNotEmpty) {
-      list = list
-          .where((p) =>
-              (p['_id'] ?? p['id'])?.toString() != widget.excludeId)
-          .toList();
+      list = list.where((p) => p.id != widget.excludeId).toList();
     }
     if (_search.isEmpty) return list;
     final q = _search.toLowerCase();
     return list.where((p) {
-      final n = (p['displayName'] ?? p['email'] ?? '').toString().toLowerCase();
-      final pos = (p['position'] ?? '').toString().toLowerCase();
+      final n = (p.displayName.isEmpty ? p.email : p.displayName).toLowerCase();
+      final pos = p.position.toLowerCase();
       return n.contains(q) || pos.contains(q);
     }).toList();
   }
@@ -438,6 +633,11 @@ class _PlayerPickerSheetState extends State<_PlayerPickerSheet> {
   @override
   Widget build(BuildContext context) {
     final players = _filtered;
+    final totalPages = (players.length / _playersPerPage).ceil().clamp(1, 999999);
+    final activePage = _currentPage.clamp(1, totalPages);
+    final start = (activePage - 1) * _playersPerPage;
+    final end = (start + _playersPerPage).clamp(0, players.length);
+    final pagePlayers = players.sublist(start, end);
     return DraggableScrollableSheet(
       initialChildSize: 0.65,
       maxChildSize: 0.9,
@@ -460,7 +660,10 @@ class _PlayerPickerSheetState extends State<_PlayerPickerSheet> {
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 18),
             child: TextField(
-              onChanged: (v) => setState(() => _search = v),
+              onChanged: (v) => setState(() {
+                _search = v;
+                _currentPage = 1;
+              }),
               decoration: InputDecoration(
                 hintText: 'Search by name or position…',
                 prefixIcon: const Icon(Icons.search, size: 20),
@@ -481,22 +684,42 @@ class _PlayerPickerSheetState extends State<_PlayerPickerSheet> {
                         style: const TextStyle(color: AppColors.textMuted)))
                 : ListView.builder(
                     controller: controller,
-                    itemCount: players.length,
+                    itemCount: pagePlayers.length,
                     padding: const EdgeInsets.symmetric(horizontal: 12),
                     itemBuilder: (_, i) {
-                      final p = players[i];
-                      final name =
-                          (p['displayName'] ?? p['email'] ?? 'Player')
-                              .toString();
-                      final pos = (p['position'] ?? '').toString();
-                      final nation = (p['nation'] ?? '').toString();
+                      final p = pagePlayers[i];
+                      final name = p.displayName.isEmpty
+                        ? (p.email.isEmpty ? 'Player' : p.email)
+                        : p.displayName;
+                      final pos = p.position;
+                      final nation = p.nation;
+                      final pid = p.id;
+                      final portraitUrl = pid.isNotEmpty
+                          ? '${ApiConfig.baseUrl}/players/$pid/portrait'
+                          : null;
                       return ListTile(
                         leading: CircleAvatar(
                           backgroundColor: AppColors.primary.withValues(alpha: 0.2),
-                          child: Text(name.isNotEmpty ? name[0].toUpperCase() : '?',
-                              style: const TextStyle(
-                                  fontWeight: FontWeight.w800,
-                                  color: AppColors.primary)),
+                          child: portraitUrl != null
+                              ? ClipOval(
+                                  child: Image.network(
+                                    portraitUrl,
+                                    fit: BoxFit.cover,
+                                    width: 40,
+                                    height: 40,
+                                    headers: {'Authorization': 'Bearer ${widget.authToken}'},
+                                    errorBuilder: (_, __, ___) => Text(
+                                      name.isNotEmpty ? name[0].toUpperCase() : '?',
+                                      style: const TextStyle(
+                                          fontWeight: FontWeight.w800,
+                                          color: AppColors.primary),
+                                    ),
+                                  ),
+                                )
+                              : Text(name.isNotEmpty ? name[0].toUpperCase() : '?',
+                                  style: const TextStyle(
+                                      fontWeight: FontWeight.w800,
+                                      color: AppColors.primary)),
                         ),
                         title: Text(name,
                             style:
@@ -514,6 +737,16 @@ class _PlayerPickerSheetState extends State<_PlayerPickerSheet> {
                     },
                   ),
           ),
+          if (players.length > _playersPerPage)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 6, 12, 12),
+              child: ListPaginator(
+                totalItems: players.length,
+                itemsPerPage: _playersPerPage,
+                currentPage: activePage,
+                onPageChanged: (page) => setState(() => _currentPage = page),
+              ),
+            ),
         ],
       ),
     );
@@ -783,12 +1016,22 @@ class _AiInsightCard extends StatelessWidget {
     required this.nameB,
     required this.aggA,
     required this.aggB,
+    required this.winsA,
+    required this.winsB,
+    required this.geminiLoading,
+    required this.geminiInsight,
+    required this.recommendedName,
   });
 
   final String nameA;
   final String nameB;
   final Map<String, dynamic> aggA;
   final Map<String, dynamic> aggB;
+  final int winsA;
+  final int winsB;
+  final bool geminiLoading;
+  final String? geminiInsight;
+  final String? recommendedName;
 
   double _v(Map<String, dynamic> m, String k) {
     final val = m[k];
@@ -883,28 +1126,18 @@ class _AiInsightCard extends StatelessWidget {
       }
     }
 
-    // Overall verdict
-    int winsA = 0, winsB = 0;
-    if (distA > distB) winsA++;
-    if (distB > distA) winsB++;
-    if (maxA > maxB) winsA++;
-    if (maxB > maxA) winsB++;
-    if (spA > spB) winsA++;
-    if (spB > spA) winsB++;
-    if (acA > acB) winsA++;
-    if (acB > acA) winsB++;
     final avgA = _v(aggA, 'avgSpeedKmh');
     final avgB = _v(aggB, 'avgSpeedKmh');
-    if (avgA > avgB) winsA++;
-    if (avgB > avgA) winsB++;
+        final totalWinsA = winsA + (avgA > avgB ? 1 : 0);
+        final totalWinsB = winsB + (avgB > avgA ? 1 : 0);
 
     String verdict;
-    if (winsA > winsB) {
+        if (totalWinsA > totalWinsB) {
       verdict =
-          '$nameA leads in $winsA of 5 categories. Overall, $nameA currently shows stronger physical performance metrics based on AI video analysis.';
-    } else if (winsB > winsA) {
+          '$nameA leads in $totalWinsA of 5 categories. Overall, $nameA currently shows stronger physical performance metrics based on AI video analysis.';
+        } else if (totalWinsB > totalWinsA) {
       verdict =
-          '$nameB leads in $winsB of 5 categories. Overall, $nameB currently shows stronger physical performance metrics based on AI video analysis.';
+          '$nameB leads in $totalWinsB of 5 categories. Overall, $nameB currently shows stronger physical performance metrics based on AI video analysis.';
     } else {
       verdict =
           'Both players are evenly matched across all categories. Consider tactical fit and positional needs for your final assessment.';
@@ -951,6 +1184,47 @@ class _AiInsightCard extends StatelessWidget {
             ),
             const SizedBox(height: 10),
           ],
+          const SizedBox(height: 4),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: AppColors.surf2(context),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: AppColors.border.withValues(alpha: 0.5)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Gemini Comparison Assistant',
+                    style: TextStyle(
+                        fontWeight: FontWeight.w800,
+                        color: AppColors.primary,
+                        fontSize: 12)),
+                const SizedBox(height: 8),
+                if (geminiLoading)
+                  const Row(
+                    children: [
+                      SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                      SizedBox(width: 8),
+                      Expanded(
+                        child: Text('Generating Gemini analysis...'),
+                      ),
+                    ],
+                  )
+                else
+                  Text(
+                    geminiInsight ??
+                        '$nameA is better in some metrics, and $nameB is better in others. Run compare again to refresh AI narrative.',
+                    style: const TextStyle(fontSize: 12, height: 1.45),
+                  ),
+              ],
+            ),
+          ),
           const Divider(color: AppColors.border),
           const SizedBox(height: 8),
           Row(
@@ -967,6 +1241,33 @@ class _AiInsightCard extends StatelessWidget {
               ),
             ],
           ),
+          if (recommendedName != null) ...[
+            const SizedBox(height: 10),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              decoration: BoxDecoration(
+                color: const Color(0xFF16A34A).withValues(alpha: 0.14),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: const Color(0xFF16A34A).withValues(alpha: 0.4)),
+              ),
+              child: Row(
+                children: [
+                  const Icon(Icons.star, size: 16, color: Color(0xFF16A34A)),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      'Recommended: $recommendedName',
+                      style: const TextStyle(
+                        color: Color(0xFF16A34A),
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ),
+                  const Icon(Icons.check_circle, size: 16, color: Color(0xFF16A34A)),
+                ],
+              ),
+            ),
+          ],
         ],
       ),
     );
@@ -1073,10 +1374,10 @@ class _VideoMetricRow extends StatelessWidget {
               spacing: 12,
               runSpacing: 4,
               children: [
-                _mini('Dist', '${dist.toStringAsFixed(0)}m'),
-                _mini('Avg', '${avg.toStringAsFixed(1)} km/h'),
-                _mini('Max', '${max.toStringAsFixed(1)} km/h'),
-                _mini('Sprints', '$sprints'),
+                _mini(context, 'Dist', '${dist.toStringAsFixed(0)}m', const Color(0xFF38BDF8)),
+                _mini(context, 'Avg', '${avg.toStringAsFixed(1)} km/h', const Color(0xFF22D3EE)),
+                _mini(context, 'Max', '${max.toStringAsFixed(1)} km/h', const Color(0xFFF59E0B)),
+                _mini(context, 'Sprints', '$sprints', const Color(0xFF22C55E)),
               ],
             ),
           ],
@@ -1085,14 +1386,28 @@ class _VideoMetricRow extends StatelessWidget {
     );
   }
 
-  Widget _mini(String label, String value) {
-    return RichText(
-      text: TextSpan(
-        style: const TextStyle(fontSize: 11),
-        children: [
-          TextSpan(text: '$label ', style: const TextStyle(color: AppColors.textMuted)),
-          TextSpan(text: value, style: const TextStyle(fontWeight: FontWeight.w800)),
-        ],
+  Widget _mini(BuildContext context, String label, String value, Color accent) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+      decoration: BoxDecoration(
+        color: accent.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: accent.withValues(alpha: 0.45)),
+      ),
+      child: RichText(
+        text: TextSpan(
+          style: TextStyle(fontSize: 11, color: AppColors.tx(context)),
+          children: [
+            TextSpan(
+              text: '$label ',
+              style: TextStyle(color: accent, fontWeight: FontWeight.w800),
+            ),
+            TextSpan(
+              text: value,
+              style: TextStyle(color: AppColors.tx(context), fontWeight: FontWeight.w900),
+            ),
+          ],
+        ),
       ),
     );
   }

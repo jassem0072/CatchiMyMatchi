@@ -21,6 +21,13 @@ pip install -r requirements.txt
 uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload
 ```
 
+Optional tracker backend selection:
+
+```
+# PowerShell
+$env:SCOUTAI_TRACKER="bytetrack"   # or "deepsort"
+```
+
 ## Example requests
 
 ### POST /process-chunk
@@ -28,7 +35,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload
 ```
 curl -X POST http://127.0.0.1:8001/process-chunk \
   -H "Content-Type: application/json" \
-  -d "{\"chunkPathOrUrl\":\"C:/path/to/chunk.mp4\",\"chunkIndex\":0,\"samplingFps\":3,\"selection\":{\"t0\":0.0,\"x\":100,\"y\":120,\"w\":80,\"h\":180},\"calibration\":null}"
+  -d "{\"chunkPathOrUrl\":\"C:/path/to/chunk.mp4\",\"chunkIndex\":0,\"samplingFps\":3,\"tracker\":\"bytetrack\",\"selection\":{\"t0\":0.0,\"x\":100,\"y\":120,\"w\":80,\"h\":180},\"calibration\":null}"
 ```
 
 ### POST /merge
@@ -48,6 +55,7 @@ curl.exe -X POST http://127.0.0.1:8001/process-upload `
   -F "file=@C:\path\to\chunk.mp4" `
   -F "chunkIndex=0" `
   -F "samplingFps=3" `
+  -F "tracker=bytetrack" `
   -F "selection={\"t0\":0.0,\"x\":100,\"y\":120,\"w\":80,\"h\":180}" 
 ```
 

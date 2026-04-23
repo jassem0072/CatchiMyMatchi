@@ -1,4 +1,4 @@
-export type UserRole = 'player' | 'scouter' | 'admin';
+export type UserRole = 'player' | 'scouter' | 'admin' | 'expert';
 export type SubscriptionTier = 'basic' | 'premium' | 'elite';
 
 export interface AdminUser {
@@ -6,6 +6,9 @@ export interface AdminUser {
   email: string;
   displayName: string;
   role: UserRole;
+  adminAccessRequestStatus?: 'none' | 'pending' | 'approved' | 'rejected';
+  adminAccessRequestedAt?: string | null;
+  adminAccessApprovedAt?: string | null;
   position?: string;
   nation?: string;
   dateOfBirth?: string | null;
@@ -22,6 +25,10 @@ export interface AdminUser {
 export interface AdminPlayer extends AdminUser {
   videoCount: number;
   reportCount: number;
+  adminWorkflow?: {
+    verificationStatus?: 'not_requested' | 'pending_expert' | 'verified' | 'rejected';
+    updatedAt?: string;
+  };
 }
 
 export interface AdminScouter extends AdminUser {
@@ -45,6 +52,43 @@ export interface PlayerDetail {
   videos: AdminVideo[];
   reports: AdminReport[];
   analytics: PlayerAnalytics;
+  workflow?: PlayerWorkflow;
+}
+
+export interface PlayerWorkflow {
+  sentVideoRequests: number;
+  verificationStatus: 'not_requested' | 'pending_expert' | 'verified' | 'rejected';
+  scouterDecision: 'pending' | 'approved' | 'cancelled';
+  expertDecision: 'pending' | 'approved' | 'cancelled';
+  expertReport: string;
+  fixedPrice: number;
+  preContractStatus: 'none' | 'draft' | 'approved' | 'cancelled';
+  contractDraft?: {
+    clubName?: string;
+    clubOfficialName?: string;
+    startDate?: string;
+    endDate?: string;
+    currency?: string;
+    salaryPeriod?: 'monthly' | 'weekly';
+    fixedBaseSalary?: number;
+    signingOnFee?: number;
+    marketValue?: number;
+    bonusPerAppearance?: number;
+    bonusGoalOrCleanSheet?: number;
+    bonusTeamTrophy?: number;
+    releaseClauseAmount?: number;
+    terminationForCauseText?: string;
+    scouterIntermediaryId?: string;
+  };
+  scouterSignedContract?: boolean;
+  scouterSignedAt?: string | null;
+  scouterSignatureName?: string;
+  contractSignedByPlayer?: boolean;
+  contractSignedAt?: string | null;
+  onlineSessionCompleted?: boolean;
+  onlineSessionCompletedAt?: string | null;
+  contractCompleted?: boolean;
+  updatedAt: string;
 }
 
 export interface ScouterDetail {
@@ -84,6 +128,8 @@ export interface AdminReport {
   _id: string;
   scouterId: string;
   playerId: string;
+  scouterDisplayName?: string;
+  playerDisplayName?: string;
   videoId?: string | null;
   title: string;
   notes: string;

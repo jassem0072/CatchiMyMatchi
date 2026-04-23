@@ -1,11 +1,13 @@
-import { BadRequestException, Body, Controller, Get, Post, Query, Req, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Patch, Post, Req, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 
 import { UsersService } from '../users/users.service';
 import { JwtAuthGuard } from './jwt-auth.guard';
 import { AuthService } from './auth.service';
 import {
+  AdminGoogleLoginDto,
   AuthTokenResponse,
+  ChangeAuthPasswordDto,
   ForgotPasswordDto,
   ForgotPasswordResponse,
   GoogleAuthDto,
@@ -13,8 +15,12 @@ import {
   LoginDto,
   OkResponse,
   RegisterDto,
+  RegisterAdminRequestDto,
   ResetPasswordDto,
+  UpdateAuthProfileDto,
 } from './auth.dto';
+import { Roles } from './roles.decorator';
+import { RolesGuard } from './roles.guard';
 import type { RequestUser } from './request-user';
 
 @ApiTags('auth')
@@ -40,6 +46,26 @@ export class AuthController {
   @Post('signup')
   async signup(@Body() dto: RegisterDto) {
     return this.register(dto);
+  }
+
+  @Post('register-expert')
+  async registerExpert(@Body() dto: RegisterDto) {
+    return this.auth.registerExpert({
+      email: dto.email,
+      password: dto.password,
+      displayName: dto.displayName,
+      position: dto.position,
+      nation: dto.nation,
+    });
+  }
+
+  @Post('request-admin-access')
+  async requestAdminAccess(@Body() dto: RegisterAdminRequestDto) {
+    return this.auth.requestAdminAccess({
+      email: dto.email,
+      password: dto.password,
+      displayName: dto.displayName,
+    });
   }
 
   @Post('login')
@@ -68,6 +94,15 @@ export class AuthController {
       email: dto.email,
       displayName: dto.displayName,
       role: (dto.role as any) || 'player',
+    });
+  }
+
+  @Post('admin-google-login')
+  async adminGoogleLogin(@Body() dto: AdminGoogleLoginDto): Promise<AuthTokenResponse> {
+    return this.auth.adminLoginWithGoogle({
+      idToken: dto.idToken,
+      accessToken: dto.accessToken,
+      displayName: dto.displayName,
     });
   }
 
@@ -119,5 +154,42 @@ export class AuthController {
     const db = await this.users.getById(u.sub);
     const { passwordHash, ...safe } = db as any;
     return safe;
+  }
+
+  @Patch('me')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('admin', 'expert')
+  async updateMe(
+    @Req() req: { user?: RequestUser },
+    @Body() dto: UpdateAuthProfileDto,
+  ) {
+    const u = req.user;
+    if (!u) throw new BadRequestException('Not authenticated');
+    return this.users.updateProfile(u.sub, {
+      displayName: dto.displayName,
+      position: dto.position,
+      nation: dto.nation,
+      dateOfBirth: dto.dateOfBirth,
+      height: dto.height,
+      playerIdNumber: dto.playerIdNumber,
+    });
+  }
+
+  @Patch('me/password')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('admin', 'expert')
+  async updateMyPassword(
+    @Req() req: { user?: RequestUser },
+    @Body() dto: ChangeAuthPasswordDto,
+  ): Promise<OkResponse> {
+    const u = req.user;
+    if (!u) throw new BadRequestException('Not authenticated');
+    if (!dto.currentPassword || !dto.newPassword) {
+      throw new BadRequestException('currentPassword and newPassword are required');
+    }
+    await this.users.changePassword(u.sub, dto.currentPassword, dto.newPassword);
+    return { ok: true };
   }
 }

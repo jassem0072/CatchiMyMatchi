@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../screens/ai_coach_chat_screen.dart';
 import '../screens/montage_screen.dart';
@@ -7,7 +8,8 @@ import '../screens/analysis_details_screen.dart';
 import '../screens/analysis_progress_screen.dart';
 import '../screens/billing_history_screen.dart';
 import '../screens/comparator_screen.dart';
-import '../screens/dashboard_screen.dart';
+import '../screens/communication_quiz_screen.dart';
+import '../screens/contract_workflow_screen.dart';
 import '../screens/edit_profile_screen.dart';
 import '../screens/help_support_screen.dart';
 import '../screens/identify_player_screen.dart';
@@ -28,9 +30,8 @@ import '../screens/settings_screen.dart';
 import '../screens/tag_teammates_screen.dart';
 import '../screens/terms_screen.dart';
 import '../screens/upload_video_screen.dart';
+import '../core/providers/settings_providers.dart';
 import '../theme/app_theme.dart';
-import '../theme/theme_notifier.dart';
-import '../services/locale_notifier.dart';
 
 class AppRoutes {
   static const login = '/login';
@@ -48,6 +49,8 @@ class AppRoutes {
   static const settings = '/settings';
   static const notifications = '/notifications';
   static const comparator = '/comparator';
+  static const contractWorkflow = '/contract-workflow';
+  static const communicationQuiz = '/communication-quiz';
   static const playerDetail = '/player-detail';
   static const scouterVideoPlayer = '/scouter-video-player';
   static const terms = '/terms';
@@ -62,7 +65,7 @@ class AppRoutes {
   static const montage = '/montage';
 }
 
-class ScoutAiApp extends StatelessWidget {
+class ScoutAiApp extends ConsumerWidget {
   const ScoutAiApp({super.key});
 
   String _computeInitialRoute() {
@@ -107,6 +110,10 @@ class ScoutAiApp extends StatelessWidget {
         return MaterialPageRoute(builder: (_) => const NotificationsScreen(), settings: rs(path));
       case AppRoutes.comparator:
         return MaterialPageRoute(builder: (_) => const ComparatorScreen(), settings: rs(path));
+      case AppRoutes.contractWorkflow:
+        return MaterialPageRoute(builder: (_) => const ContractWorkflowScreen(), settings: rs(path));
+      case AppRoutes.communicationQuiz:
+        return MaterialPageRoute(builder: (_) => const CommunicationQuizScreen(), settings: rs(path));
       case AppRoutes.playerDetail:
         return MaterialPageRoute(builder: (_) => const PlayerDetailScreen(), settings: rs(path));
       case AppRoutes.scouterVideoPlayer:
@@ -137,14 +144,10 @@ class ScoutAiApp extends StatelessWidget {
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final initialRoute = _computeInitialRoute();
-    return ValueListenableBuilder<ThemeMode>(
-      valueListenable: ThemeNotifier.instance,
-      builder: (_, themeMode, __) {
-        return ValueListenableBuilder<Locale>(
-          valueListenable: LocaleNotifier.instance,
-          builder: (_, locale, __) {
+    final themeMode = ref.watch(themeModeProvider);
+    final locale = ref.watch(appLocaleProvider);
         return MaterialApp(
           title: 'ScoutAI',
           debugShowCheckedModeBanner: false,
@@ -168,10 +171,6 @@ class ScoutAiApp extends StatelessWidget {
         return routes;
       },
       onGenerateRoute: (settings) => _routeFor(settings.name, arguments: settings.arguments),
-    );
-          },
-        );
-      },
     );
   }
 }

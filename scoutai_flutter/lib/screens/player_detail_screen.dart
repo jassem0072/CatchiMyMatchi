@@ -1,18 +1,27 @@
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'dart:convert';
 import 'dart:typed_data';
+
 import 'package:http/http.dart' as http;
+import 'package:file_picker/file_picker.dart';
+import 'package:pdf/pdf.dart';
+import 'package:pdf/widgets.dart' as pw;
+import 'package:qr_flutter/qr_flutter.dart';
 
 import '../services/api_config.dart';
 import '../services/auth_storage.dart';
+import '../services/jwt_utils.dart';
+import '../services/pdf_download_helper.dart';
 import '../services/translations.dart';
 import '../theme/app_colors.dart';
 import '../widgets/common.dart';
 import '../widgets/country_picker.dart';
 import '../widgets/fifa_card_stats.dart';
 import '../widgets/legendary_player_card.dart';
+import '../widgets/list_paginator.dart';
 
 /// Detailed view of a player (used by scouters from Marketplace/Following).
 class PlayerDetailScreen extends StatefulWidget {
@@ -23,12 +32,64 @@ class PlayerDetailScreen extends StatefulWidget {
 }
 
 class _PlayerDetailScreenState extends State<PlayerDetailScreen> {
+  static const int _breakdownPerPage = 4;
+
   bool _loading = true;
   String? _error;
   Map<String, dynamic>? _player;
   Map<String, dynamic>? _dashboard;
+  bool _subscriptionExpired = false;
+  String? _subscriptionMessage;
   bool _isFavorite = false;
+  Map<String, dynamic>? _workflow;
+  bool _workflowBusy = false;
   Uint8List? _portraitBytes;
+  bool _exportingPdf = false;
+  int _breakdownPage = 1;
+  int _performanceStep = 0;
+  double _breakdownSwipeDx = 0;
+  bool _breakdownSwipeConsumed = false;
+  final PageController _performanceStepperController = PageController();
+  final TextEditingController _fixedPriceCtrl = TextEditingController();
+  final TextEditingController _clubNameCtrl = TextEditingController();
+  final TextEditingController _clubOfficialNameCtrl = TextEditingController();
+  final TextEditingController _startDateCtrl = TextEditingController();
+  final TextEditingController _endDateCtrl = TextEditingController();
+  final TextEditingController _currencyCtrl = TextEditingController(text: 'EUR');
+  final TextEditingController _fixedBaseSalaryCtrl = TextEditingController();
+  final TextEditingController _signingFeeCtrl = TextEditingController();
+  final TextEditingController _marketValueCtrl = TextEditingController();
+  final TextEditingController _bonusAppearanceCtrl = TextEditingController();
+  final TextEditingController _bonusGoalCtrl = TextEditingController();
+  final TextEditingController _bonusTrophyCtrl = TextEditingController();
+  final TextEditingController _releaseClauseCtrl = TextEditingController();
+  final TextEditingController _terminationCtrl = TextEditingController();
+  final TextEditingController _intermediaryCtrl = TextEditingController();
+  String _salaryPeriod = 'monthly';
+  Uint8List? _scouterSignatureBytes;
+  String _scouterSignatureContentType = 'image/png';
+  String _scouterSignatureFileName = 'scouter-signature.png';
+
+  @override
+  void dispose() {
+    _performanceStepperController.dispose();
+    _fixedPriceCtrl.dispose();
+    _clubNameCtrl.dispose();
+    _clubOfficialNameCtrl.dispose();
+    _startDateCtrl.dispose();
+    _endDateCtrl.dispose();
+    _currencyCtrl.dispose();
+    _fixedBaseSalaryCtrl.dispose();
+    _signingFeeCtrl.dispose();
+    _marketValueCtrl.dispose();
+    _bonusAppearanceCtrl.dispose();
+    _bonusGoalCtrl.dispose();
+    _bonusTrophyCtrl.dispose();
+    _releaseClauseCtrl.dispose();
+    _terminationCtrl.dispose();
+    _intermediaryCtrl.dispose();
+    super.dispose();
+  }
 
   @override
   void didChangeDependencies() {
@@ -57,21 +118,640 @@ class _PlayerDetailScreenState extends State<PlayerDetailScreen> {
       if (res.statusCode >= 400) {
         debugPrint('GET $uri -> ${res.statusCode}');
         if (res.body.isNotEmpty) debugPrint(res.body);
-        throw Exception('Failed to load player dashboard (HTTP ${res.statusCode})');
+        final apiMessage = _extractApiMessage(res.body);
+        if (_isSubscriptionExpiredError(res.statusCode, apiMessage)) {
+          if (!mounted) return;
+          setState(() {
+            _dashboard = null;
+            _subscriptionExpired = true;
+            _subscriptionMessage = apiMessage;
+            _error = null;
+            _breakdownPage = 1;
+            _loading = false;
+          });
+          _computeRichStats();
+          _loadPortrait(playerId);
+          _loadScouterWorkflow(playerId);
+          return;
+        }
+        final details = apiMessage.isNotEmpty ? ': $apiMessage' : '';
+        throw Exception('Failed to load player dashboard (HTTP ${res.statusCode})$details');
       }
       final data = jsonDecode(res.body);
       if (!mounted) return;
       setState(() {
+        if (data is Map<String, dynamic>) {
+          final loadedPlayer = data['player'];
+          if (loadedPlayer is Map) {
+            _player = {
+              ...?_player,
+              ...Map<String, dynamic>.from(loadedPlayer),
+            };
+          }
+        }
         _dashboard = data is Map<String, dynamic> ? data : null;
+        _subscriptionExpired = false;
+        _subscriptionMessage = null;
+        _breakdownPage = 1;
         _loading = false;
       });
       _computeRichStats();
       // Load portrait
       _loadPortrait(playerId);
+      _loadScouterWorkflow(playerId);
     } catch (e) {
       if (!mounted) return;
       setState(() { _error = e.toString().replaceFirst('Exception: ', ''); _loading = false; });
     }
+  }
+
+  Future<void> _loadScouterWorkflow(String playerId) async {
+    final token = await AuthStorage.loadToken();
+    if (!mounted || token == null) return;
+    try {
+      final uri = Uri.parse('${ApiConfig.baseUrl}/admin/players/$playerId');
+      final res = await http.get(uri, headers: {'Authorization': 'Bearer $token'});
+      if (!mounted) return;
+      if (res.statusCode == 403) return;
+      if (res.statusCode >= 400) return;
+      final data = jsonDecode(res.body);
+      if (data is! Map<String, dynamic>) return;
+      final wfRaw = data['workflow'];
+      if (wfRaw is! Map) return;
+      final wf = Map<String, dynamic>.from(wfRaw);
+      final draftRaw = wf['contractDraft'];
+      final draft = draftRaw is Map ? Map<String, dynamic>.from(draftRaw) : <String, dynamic>{};
+      setState(() {
+        _workflow = wf;
+        final fp = (wf['fixedPrice'] as num?)?.toDouble() ?? 0;
+        _fixedPriceCtrl.text = fp <= 0 ? '' : fp.toStringAsFixed(fp.truncateToDouble() == fp ? 0 : 2);
+        _clubNameCtrl.text = (draft['clubName'] ?? '').toString();
+        _clubOfficialNameCtrl.text = (draft['clubOfficialName'] ?? '').toString();
+        _startDateCtrl.text = (draft['startDate'] ?? '').toString();
+        _endDateCtrl.text = (draft['endDate'] ?? '').toString();
+        _currencyCtrl.text = (draft['currency'] ?? 'EUR').toString();
+        _salaryPeriod = (draft['salaryPeriod'] == 'weekly') ? 'weekly' : 'monthly';
+        _fixedBaseSalaryCtrl.text = _numToText(draft['fixedBaseSalary']);
+        _signingFeeCtrl.text = _numToText(draft['signingOnFee']);
+        _marketValueCtrl.text = _numToText(draft['marketValue']);
+        _bonusAppearanceCtrl.text = _numToText(draft['bonusPerAppearance']);
+        _bonusGoalCtrl.text = _numToText(draft['bonusGoalOrCleanSheet']);
+        _bonusTrophyCtrl.text = _numToText(draft['bonusTeamTrophy']);
+        _releaseClauseCtrl.text = _numToText(draft['releaseClauseAmount']);
+        _terminationCtrl.text = (draft['terminationForCauseText'] ?? '').toString();
+        _intermediaryCtrl.text = (draft['scouterIntermediaryId'] ?? '').toString();
+        final sigB64 = (wf['scouterSignatureImageBase64'] ?? '').toString();
+        if (sigB64.isNotEmpty) {
+          try {
+            _scouterSignatureBytes = base64Decode(sigB64);
+            _scouterSignatureContentType = (wf['scouterSignatureImageContentType'] ?? 'image/png').toString();
+            _scouterSignatureFileName = (wf['scouterSignatureImageFileName'] ?? 'scouter-signature.png').toString();
+          } catch (_) {
+            _scouterSignatureBytes = null;
+          }
+        }
+      });
+    } catch (_) {
+      // Ignore for non-admin/non-scouter contexts.
+    }
+  }
+
+  Future<void> _updateScouterDecision(String decision) async {
+    final playerId = (_player?['_id'] ?? _player?['id'])?.toString() ?? '';
+    if (playerId.isEmpty) return;
+    final token = await AuthStorage.loadToken();
+    if (token == null || !mounted) return;
+    setState(() => _workflowBusy = true);
+    try {
+      final uri = Uri.parse('${ApiConfig.baseUrl}/admin/players/$playerId/scouter-decision');
+      final res = await http.patch(
+        uri,
+        headers: {
+          'Authorization': 'Bearer $token',
+          'Content-Type': 'application/json',
+        },
+        body: jsonEncode({'decision': decision}),
+      );
+      if (!mounted) return;
+      if (res.statusCode >= 400) {
+        final msg = _extractApiMessage(res.body);
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg.isEmpty ? 'Scouter decision failed' : msg)));
+        setState(() => _workflowBusy = false);
+        return;
+      }
+      final data = jsonDecode(res.body);
+      if (data is Map<String, dynamic> && data['workflow'] is Map) {
+        setState(() {
+          _workflow = Map<String, dynamic>.from(data['workflow'] as Map);
+          _workflowBusy = false;
+        });
+      } else {
+        setState(() => _workflowBusy = false);
+      }
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _workflowBusy = false);
+    }
+  }
+
+  Future<void> _requestExpertVerification() async {
+    final playerId = (_player?['_id'] ?? _player?['id'])?.toString() ?? '';
+    if (playerId.isEmpty) return;
+    final token = await AuthStorage.loadToken();
+    if (token == null || !mounted) return;
+
+    setState(() => _workflowBusy = true);
+    try {
+      final uri = Uri.parse('${ApiConfig.baseUrl}/admin/players/$playerId/request-info-verification');
+      final res = await http.post(uri, headers: {'Authorization': 'Bearer $token'});
+      if (!mounted) return;
+
+      if (res.statusCode >= 400) {
+        final msg = _extractApiMessage(res.body);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(msg.isEmpty ? 'Unable to request verification' : msg)),
+        );
+        setState(() => _workflowBusy = false);
+        return;
+      }
+
+      final data = jsonDecode(res.body);
+      if (data is Map<String, dynamic> && data['workflow'] is Map) {
+        setState(() {
+          _workflow = Map<String, dynamic>.from(data['workflow'] as Map);
+          _workflowBusy = false;
+        });
+      } else {
+        setState(() => _workflowBusy = false);
+      }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Verification request sent to expert successfully')),
+      );
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _workflowBusy = false);
+    }
+  }
+
+  Future<void> _updatePreContract({required String status}) async {
+    final playerId = (_player?['_id'] ?? _player?['id'])?.toString() ?? '';
+    if (playerId.isEmpty) return;
+    final token = await AuthStorage.loadToken();
+    if (token == null || !mounted) return;
+    if (status == 'approved' && _scouterSignatureBytes == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please generate your unique QR signature before approval')),
+      );
+      return;
+    }
+    final fixedPrice = double.tryParse(_fixedPriceCtrl.text.trim()) ?? 0;
+
+    setState(() => _workflowBusy = true);
+    try {
+      final uri = Uri.parse('${ApiConfig.baseUrl}/admin/players/$playerId/pre-contract');
+      final res = await http.patch(
+        uri,
+        headers: {
+          'Authorization': 'Bearer $token',
+          'Content-Type': 'application/json',
+        },
+        body: jsonEncode({
+          'fixedPrice': fixedPrice,
+          'status': status,
+          'clubName': _clubNameCtrl.text.trim(),
+          'clubOfficialName': _clubOfficialNameCtrl.text.trim(),
+          'startDate': _startDateCtrl.text.trim(),
+          'endDate': _endDateCtrl.text.trim(),
+          'currency': _currencyCtrl.text.trim().isEmpty ? 'EUR' : _currencyCtrl.text.trim().toUpperCase(),
+          'salaryPeriod': _salaryPeriod,
+          'fixedBaseSalary': _parseMoney(_fixedBaseSalaryCtrl.text),
+          'signingOnFee': _parseMoney(_signingFeeCtrl.text),
+          'marketValue': _parseMoney(_marketValueCtrl.text),
+          'bonusPerAppearance': _parseMoney(_bonusAppearanceCtrl.text),
+          'bonusGoalOrCleanSheet': _parseMoney(_bonusGoalCtrl.text),
+          'bonusTeamTrophy': _parseMoney(_bonusTrophyCtrl.text),
+          'releaseClauseAmount': _parseMoney(_releaseClauseCtrl.text),
+          'terminationForCauseText': _terminationCtrl.text.trim(),
+          'scouterIntermediaryId': _intermediaryCtrl.text.trim(),
+          'scouterSignNow': status == 'approved',
+          'scouterSignatureImageBase64': _scouterSignatureBytes == null ? '' : base64Encode(_scouterSignatureBytes!),
+          'scouterSignatureImageContentType': _scouterSignatureContentType,
+          'scouterSignatureImageFileName': _scouterSignatureFileName,
+        }),
+      );
+      if (!mounted) return;
+      if (res.statusCode >= 400) {
+        final msg = _extractApiMessage(res.body);
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg.isEmpty ? 'Pre-contract update failed' : msg)));
+        setState(() => _workflowBusy = false);
+        return;
+      }
+      final data = jsonDecode(res.body);
+      if (data is Map<String, dynamic> && data['workflow'] is Map) {
+        final wf = Map<String, dynamic>.from(data['workflow'] as Map);
+        final draftRaw = wf['contractDraft'];
+        final draft = draftRaw is Map ? Map<String, dynamic>.from(draftRaw) : const <String, dynamic>{};
+        setState(() {
+          _workflow = wf;
+          _intermediaryCtrl.text = (draft['scouterIntermediaryId'] ?? '').toString();
+          _workflowBusy = false;
+        });
+      } else {
+        setState(() => _workflowBusy = false);
+      }
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _workflowBusy = false);
+    }
+  }
+
+  String _extractApiMessage(String body) {
+    if (body.trim().isEmpty) return '';
+    try {
+      final decoded = jsonDecode(body);
+      if (decoded is Map<String, dynamic>) {
+        final message = decoded['message'];
+        if (message is String) return message.trim();
+      }
+    } catch (_) {}
+    return body.trim();
+  }
+
+  String _numToText(dynamic value) {
+    final n = (value is num) ? value.toDouble() : double.tryParse(value?.toString() ?? '');
+    if (n == null || n <= 0) return '';
+    return n.truncateToDouble() == n ? n.toStringAsFixed(0) : n.toStringAsFixed(2);
+  }
+
+  double _parseMoney(String raw) => double.tryParse(raw.trim()) ?? 0;
+
+  Future<String> _scouterSignatureQrValue() async {
+    var userId = '';
+    var email = '';
+    var role = 'scouter';
+
+    final token = await AuthStorage.loadToken();
+    if (token != null) {
+      final payload = decodeJwtPayload(token);
+      userId = (payload['sub'] ?? payload['id'] ?? '').toString().trim();
+      email = (payload['email'] ?? '').toString().trim().toLowerCase();
+      final fromTokenRole = (payload['role'] ?? '').toString().trim();
+      if (fromTokenRole.isNotEmpty) role = fromTokenRole;
+    }
+
+    if (userId.isEmpty) {
+      userId = _intermediaryCtrl.text.trim();
+    }
+
+    final fallbackName = email.contains('@') ? email.split('@').first : 'scouter';
+    final nameParts = fallbackName.split(RegExp(r'\s+')).where((p) => p.trim().isNotEmpty).toList();
+    final firstName = nameParts.isNotEmpty ? nameParts.first : '';
+    final lastName = nameParts.length > 1 ? nameParts.sublist(1).join(' ') : '';
+    final pictureRef = (_player?['portraitFile'] ?? '').toString();
+
+    final qrPayload = <String, dynamic>{
+      't': 'scoutai-signature',
+      'v': 2,
+      'role': role,
+      'id': userId,
+      'nom': lastName.isNotEmpty ? lastName : fallbackName,
+      'prenom': firstName,
+      'email': email,
+      'picture': _portraitBytes != null ? 'portrait-loaded' : pictureRef,
+    };
+    return jsonEncode(qrPayload);
+  }
+
+  Future<Uint8List?> _buildSignatureQrPng(String value) async {
+    try {
+      final painter = QrPainter(
+        data: value,
+        version: QrVersions.auto,
+        gapless: true,
+        color: const Color(0xFF000000),
+        emptyColor: const Color(0xFFFFFFFF),
+      );
+      final imageData = await painter.toImageData(512, format: ui.ImageByteFormat.png);
+      return imageData?.buffer.asUint8List();
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _pickScouterSignatureImage() async {
+    final signatureValue = await _scouterSignatureQrValue();
+    final bytes = await _buildSignatureQrPng(signatureValue);
+    if (bytes == null || bytes.isEmpty || !mounted) return;
+    if (!mounted) return;
+    setState(() {
+      _scouterSignatureBytes = bytes;
+      _scouterSignatureContentType = 'image/png';
+      _scouterSignatureFileName = 'scouter-signature-qr-${signatureValue.hashCode.abs()}.png';
+    });
+  }
+
+  Future<void> _exportContractPdf() async {
+    final workflow = _workflow;
+    if (workflow == null) return;
+    final draftRaw = workflow['contractDraft'];
+    final draft = draftRaw is Map ? Map<String, dynamic>.from(draftRaw) : <String, dynamic>{};
+    final fixedPrice = (workflow['fixedPrice'] as num?)?.toDouble() ?? 0;
+    final currency = (draft['currency'] ?? 'EUR').toString();
+    final doc = pw.Document();
+    pw.MemoryImage? scouterSig;
+    pw.MemoryImage? playerSig;
+    pw.MemoryImage? agencySig;
+    try {
+      final b64 = (workflow['scouterSignatureImageBase64'] ?? '').toString();
+      if (b64.isNotEmpty) scouterSig = pw.MemoryImage(base64Decode(b64));
+    } catch (_) {}
+    try {
+      final b64 = (workflow['playerSignatureImageBase64'] ?? '').toString();
+      if (b64.isNotEmpty) playerSig = pw.MemoryImage(base64Decode(b64));
+    } catch (_) {}
+    final agencyQrPayload = jsonEncode(<String, dynamic>{
+      't': 'scoutai-signature',
+      'v': 2,
+      'role': 'agency',
+      'id': 'scoutai',
+      'nom': 'Agency',
+      'prenom': 'ScoutAI',
+      'email': 'legal@scoutai.pro',
+      'picture': 'scoutai-logo',
+    });
+    final agencyQrBytes = await _buildSignatureQrPng(agencyQrPayload);
+    if (agencyQrBytes != null && agencyQrBytes.isNotEmpty) {
+      agencySig = pw.MemoryImage(agencyQrBytes);
+    }
+
+    String txt(dynamic value) {
+      final s = (value ?? '').toString().trim();
+      return s.isEmpty ? '-' : s;
+    }
+
+    pw.Widget sectionTitle(String title) => pw.Padding(
+      padding: const pw.EdgeInsets.only(bottom: 6),
+      child: pw.Text(title, style: pw.TextStyle(fontSize: 13, fontWeight: pw.FontWeight.bold, color: PdfColors.blueGrey900)),
+    );
+
+    final legalArticles = <String>[
+      'SECTION I : CADRE JURIDIQUE ET ENGAGEMENT',
+      'Article 1 : Identification des parties. Le contrat precise le club, son affiliation federale, et l identite complete du joueur.',
+      'Article 2 : Objet du contrat. Le joueur est engage comme Sportif Professionnel soumis au droit du travail applicable.',
+      'Article 3 : Duree du contrat. Les dates de debut et de fin sont obligatoires, avec une limite maximale de 5 ans conforme FIFA.',
+      'Article 4 : Homologation. Le contrat devient opposable apres validation par la Ligue competente.',
+      'Article 5 : Condition de sante. L echec a la visite medicale essentielle peut rendre le contrat nul.',
+      'Article 6 : Autorisation de travail. Pour les joueurs hors UE, la validite depend de l obtention du visa sportif.',
+      'SECTION II : OBLIGATIONS SPORTIVES',
+      'Article 7 : Prestation de travail. Le joueur doit fournir son meilleur effort en match et a l entrainement.',
+      'Article 8 : Entrainements. Presence obligatoire, retards et absences peuvent etre sanctionnes.',
+      'Article 9 : Competitions. Le joueur dispute les rencontres pour lesquelles il est selectionne.',
+      'Article 10 : Stages de preparation. Participation obligatoire aux stages et deplacements, y compris a l etranger.',
+      'Article 11 : Soins et recuperation. Le joueur suit les protocoles medicaux prescrits.',
+      'Article 12 : Equipements officiels. Port obligatoire des tenues du club lors des apparitions officielles.',
+      'Article 13 : Selection nationale. Le club libere le joueur aux dates FIFA avec obligation de retour dans les delais.',
+      'SECTION III : REMUNERATION',
+      'Article 14 : Salaire mensuel. Le fixe brut est verse selon la periodicite contractuelle.',
+      'Article 15 : Prime de signature. Peut etre remboursable en cas de rupture fautive par le joueur.',
+      'Article 16 : Prime de presence. Versement par apparition effective en competition officielle.',
+      'Article 17 : Prime de victoire ou nul. Bareme collectif annexe au contrat.',
+      'Article 18 : Bonus de buts et passes. Paliers de performance definis contractuellement.',
+      'Article 19 : Prime d ethique. Bonus conditionne au respect du code de conduite.',
+      'Article 20 : Avantages logement. Avantage en nature soumis au regime fiscal applicable.',
+      'Article 21 : Vehicule. Mise a disposition eventuelle selon politique club ou sponsor.',
+      'Article 22 : Billets d avion. Nombre annuel et conditions de prise en charge definis au contrat.',
+      'SECTION IV : DROITS A L IMAGE ET MARKETING',
+      'Article 23 : Image collective. Utilisation autorisee dans les campagnes collectives du club.',
+      'Article 24 : Image individuelle. Repartition des revenus selon clauses d exploitation individuelle.',
+      'Article 25 : Reseaux sociaux. Obligation de moderation, interdiction de propos prejudiciables au club.',
+      'Article 26 : Interviews. Soumises a autorisation du service media du club.',
+      'Article 27 : Apparitions sponsors. Nombre annuel d obligations promotionnelles fixe contractuellement.',
+      'SECTION V : HYGIENE DE VIE ET DISCIPLINE',
+      'Article 28 : Etat de forme. Suivi regulier des indicateurs physiques et du poids de forme.',
+      'Article 29 : Sports a risque. Pratiques dangereuses interdites sans autorisation ecrite.',
+      'Article 30 : Alcool et tabac. Restrictions strictes dans le cadre des activites du club.',
+      'Article 31 : Paris sportifs. Interdiction totale de parier sur le football professionnel.',
+      'Article 32 : Vie nocturne. Regles de couvre-feu avant competition.',
+      'Article 33 : Antidopage. Obligation de se soumettre aux controles inopines.',
+      'SECTION VI : PROTECTION ET TRANSFERT',
+      'Article 34 : Clause de relegation. Ajustement de remuneration en cas de descente.',
+      'Article 35 : Clause liberatoire. Montant fixe permettant un depart sous conditions.',
+      'Article 36 : Pourcentage a la revente. Repartition contractuelle sur transfert futur.',
+      'Article 37 : Maintien de salaire. Regime applicable en cas de blessure longue duree.',
+      'SECTION VII : FIN DE CONTRAT ET LITIGES',
+      'Article 38 : Resiliation pour faute grave. Motifs : violence, dopage, corruption, abandon de poste.',
+      'Article 39 : Confidentialite. Interdiction de divulgation des termes contractuels a des tiers.',
+      'Article 40 : Droit applicable. Litiges soumis aux organes competents FIFA et au TAS selon competence.',
+    ];
+
+    final partyLegalNotes = <String>[
+      'Player legal obligations: execute sporting duties, respect disciplinary standards, protect confidential information, and comply with medical protocol.',
+      'Scouter legal obligations: ensure legal intermediation practice, transparent communication, and proper documentation of negotiation milestones.',
+      'ScoutAI Agency legal obligations: provide auditable governance, enforce compliance controls, and apply the 3% agency commission defined by contract.',
+      'Joint legal framework: all parties accept digital signature evidence, identity traceability, and dispute handling under the governing law clause.',
+    ];
+
+    final playerSigned = workflow['contractSignedByPlayer'] == true;
+    final scouterSigned = workflow['scouterSignedContract'] == true;
+    final playerSigBox = playerSig == null
+        ? pw.Container(height: 120, alignment: pw.Alignment.center, child: pw.Text('Pending signature', style: const pw.TextStyle(color: PdfColors.grey600, fontSize: 10)))
+        : pw.Container(height: 120, alignment: pw.Alignment.center, child: pw.Image(playerSig, fit: pw.BoxFit.contain));
+    final scouterSigBox = scouterSig == null
+        ? pw.Container(height: 120, alignment: pw.Alignment.center, child: pw.Text('Pending signature', style: const pw.TextStyle(color: PdfColors.grey600, fontSize: 10)))
+        : pw.Container(height: 120, alignment: pw.Alignment.center, child: pw.Image(scouterSig, fit: pw.BoxFit.contain));
+    final agencySigBox = agencySig == null
+      ? pw.Container(height: 120, alignment: pw.Alignment.center, child: pw.Text('Auto-applied QR', style: const pw.TextStyle(color: PdfColors.grey600, fontSize: 10)))
+      : pw.Container(height: 120, alignment: pw.Alignment.center, child: pw.Image(agencySig, fit: pw.BoxFit.contain));
+
+    doc.addPage(
+      pw.MultiPage(
+        pageFormat: PdfPageFormat.a4,
+        build: (_) => [
+          pw.Container(
+            padding: const pw.EdgeInsets.all(14),
+            decoration: pw.BoxDecoration(
+              color: PdfColors.blueGrey900,
+              borderRadius: const pw.BorderRadius.all(pw.Radius.circular(10)),
+            ),
+            child: pw.Column(
+              crossAxisAlignment: pw.CrossAxisAlignment.start,
+              children: [
+                pw.Text('SCOUTAI PROFESSIONAL PRE-CONTRACT', style: pw.TextStyle(fontSize: 16, fontWeight: pw.FontWeight.bold, color: PdfColors.white)),
+                pw.SizedBox(height: 4),
+                pw.Text('Digitally prepared contract summary', style: const pw.TextStyle(fontSize: 10, color: PdfColors.white)),
+              ],
+            ),
+          ),
+          pw.SizedBox(height: 12),
+          sectionTitle('Parties'),
+          pw.Text(
+            'The parties, identity references and contract timeline are expressed below as legal narrative points.',
+            style: const pw.TextStyle(fontSize: 9.5, color: PdfColors.blueGrey700),
+          ),
+          pw.SizedBox(height: 4),
+          pw.Bullet(text: 'Player: ${txt((_player?['displayName'] ?? _player?['email'] ?? 'Unknown'))}'),
+          pw.Bullet(text: 'Club: ${txt(draft['clubName'])}'),
+          pw.Bullet(text: 'Scouter ID: ${txt(draft['scouterIntermediaryId'])}'),
+          pw.Bullet(text: 'Contract period: ${txt(draft['startDate'])} to ${txt(draft['endDate'])}'),
+          pw.Bullet(text: 'Salary period: ${txt(draft['salaryPeriod'] ?? _salaryPeriod)}'),
+          pw.SizedBox(height: 10),
+          sectionTitle('Financial Terms'),
+          pw.Text(
+            'Compensation terms are detailed with fixed and variable components, plus mandatory platform controls.',
+            style: const pw.TextStyle(fontSize: 9.5, color: PdfColors.blueGrey700),
+          ),
+          pw.SizedBox(height: 4),
+          pw.Bullet(text: 'Fixed transfer contract value: $currency ${fixedPrice.toStringAsFixed(2)}'),
+          pw.Bullet(text: 'Fixed base salary: $currency ${_numToText(draft['fixedBaseSalary'])}'),
+          pw.Bullet(text: 'Signing fee: $currency ${_numToText(draft['signingOnFee'])}'),
+          pw.Bullet(text: 'Market value: $currency ${_numToText(draft['marketValue'])}'),
+          pw.Bullet(text: 'Release clause: $currency ${_numToText(draft['releaseClauseAmount'])}'),
+          pw.Bullet(text: 'Bonus per appearance: $currency ${_numToText(draft['bonusPerAppearance'])}'),
+          pw.Bullet(text: 'Bonus goal/clean sheet: $currency ${_numToText(draft['bonusGoalOrCleanSheet'])}'),
+          pw.Bullet(text: 'Bonus team trophy: $currency ${_numToText(draft['bonusTeamTrophy'])}'),
+          pw.Bullet(text: 'Platform fee (3%): $currency ${(fixedPrice * 0.03).toStringAsFixed(2)}'),
+          pw.Bullet(text: 'ScoutAI agency commission (3%): payable to ScoutAI according to invoicing terms.'),
+          pw.Bullet(text: 'Expert verification fee: USD 30 (paid by platform)'),
+          pw.SizedBox(height: 10),
+          sectionTitle('Termination Clause'),
+          pw.Container(
+            width: double.infinity,
+            padding: const pw.EdgeInsets.all(10),
+            decoration: pw.BoxDecoration(border: pw.Border.all(color: PdfColors.blueGrey200)),
+            child: pw.Text(txt(draft['terminationForCauseText'])),
+          ),
+          pw.SizedBox(height: 12),
+          sectionTitle('Cadre Juridique Du Contrat Professionnel'),
+          ...legalArticles.map(
+            (c) => pw.Padding(
+              padding: const pw.EdgeInsets.only(bottom: 6),
+              child: pw.Text(c, style: const pw.TextStyle(fontSize: 9.4, lineSpacing: 1.25)),
+            ),
+          ),
+          pw.SizedBox(height: 10),
+          sectionTitle('Juridical Responsibilities By Party'),
+          ...partyLegalNotes.map(
+            (c) => pw.Padding(
+              padding: const pw.EdgeInsets.only(bottom: 6),
+              child: pw.Text(c, style: const pw.TextStyle(fontSize: 9.4, lineSpacing: 1.25)),
+            ),
+          ),
+          pw.SizedBox(height: 12),
+          sectionTitle('Digital Signatures'),
+          pw.Row(
+            crossAxisAlignment: pw.CrossAxisAlignment.start,
+            children: [
+              pw.Expanded(
+                child: pw.Container(
+                  padding: const pw.EdgeInsets.all(8),
+                  decoration: pw.BoxDecoration(border: pw.Border.all(color: PdfColors.blueGrey200)),
+                  child: pw.Column(
+                    crossAxisAlignment: pw.CrossAxisAlignment.start,
+                    children: [
+                      pw.Text('Player (Left)', style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
+                      pw.SizedBox(height: 4),
+                      playerSigBox,
+                      pw.SizedBox(height: 4),
+                      pw.Text('Signed: ${playerSigned ? 'Yes' : 'No'}', style: const pw.TextStyle(fontSize: 10)),
+                      pw.Text('Timestamp: ${txt(workflow['contractSignedAt'])}', style: const pw.TextStyle(fontSize: 10)),
+                    ],
+                  ),
+                ),
+              ),
+              pw.SizedBox(width: 10),
+              pw.Expanded(
+                child: pw.Container(
+                  padding: const pw.EdgeInsets.all(8),
+                  decoration: pw.BoxDecoration(border: pw.Border.all(color: PdfColors.blueGrey200)),
+                  child: pw.Column(
+                    crossAxisAlignment: pw.CrossAxisAlignment.start,
+                    children: [
+                      pw.Text('Scouter (Right)', style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
+                      pw.SizedBox(height: 4),
+                      scouterSigBox,
+                      pw.SizedBox(height: 4),
+                      pw.Text('Signed: ${scouterSigned ? 'Yes' : 'No'}', style: const pw.TextStyle(fontSize: 10)),
+                      pw.Text('Timestamp: ${txt(workflow['scouterSignedAt'])}', style: const pw.TextStyle(fontSize: 10)),
+                    ],
+                  ),
+                ),
+              ),
+              pw.SizedBox(width: 10),
+              pw.Expanded(
+                child: pw.Container(
+                  padding: const pw.EdgeInsets.all(8),
+                  decoration: pw.BoxDecoration(border: pw.Border.all(color: PdfColors.blueGrey200)),
+                  child: pw.Column(
+                    crossAxisAlignment: pw.CrossAxisAlignment.start,
+                    children: [
+                      pw.Text('ScoutAI Agency', style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
+                      pw.SizedBox(height: 4),
+                      agencySigBox,
+                      pw.SizedBox(height: 4),
+                      pw.Text('Signed: Yes (Digital QR)', style: const pw.TextStyle(fontSize: 10)),
+                      pw.Text('Timestamp: ${txt(workflow['contractSignedAt'])}', style: const pw.TextStyle(fontSize: 10)),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+
+    final bytes = await doc.save();
+    final safeName = ((_player?['displayName'] ?? 'Player').toString()).replaceAll(RegExp(r'[^a-zA-Z0-9_-]+'), '_');
+    final fileName = 'ScoutAI_Contract_$safeName.pdf';
+    final didWebDownload = await triggerPdfDownload(bytes, fileName);
+    if (didWebDownload) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Contract PDF downloaded: $fileName'), backgroundColor: const Color(0xFF16A34A)),
+      );
+      return;
+    }
+
+    final savePath = await FilePicker.platform.saveFile(
+      dialogTitle: 'Save contract as PDF',
+      fileName: fileName,
+      type: FileType.custom,
+      allowedExtensions: ['pdf'],
+      bytes: bytes,
+    );
+    if (!mounted || savePath == null) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Contract PDF downloaded: $fileName'), backgroundColor: const Color(0xFF16A34A)),
+    );
+  }
+
+  bool _isSubscriptionExpiredError(int statusCode, String apiMessage) {
+    if (statusCode != 400) return false;
+    final normalized = apiMessage.toLowerCase();
+    return normalized.contains('subscription expired') ||
+        normalized.contains('renew to access player data');
+  }
+
+  Widget _moneyField(TextEditingController controller, String label) {
+    return TextField(
+      controller: controller,
+      keyboardType: const TextInputType.numberWithOptions(decimal: true),
+      decoration: InputDecoration(
+        labelText: label,
+        prefixText: '${_currencyCtrl.text.trim().isEmpty ? 'EUR' : _currencyCtrl.text.trim().toUpperCase()} ',
+        filled: true,
+        fillColor: AppColors.surface.withValues(alpha: 0.5),
+        border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+      ),
+    );
+  }
+
+  List<dynamic> _pageSlice(List<dynamic> source, int page, int perPage) {
+    final start = (page - 1) * perPage;
+    if (start >= source.length) return const [];
+    final end = (start + perPage).clamp(0, source.length);
+    return source.sublist(start, end);
   }
 
   Future<void> _loadPortrait(String playerId) async {
@@ -199,6 +879,9 @@ class _PlayerDetailScreenState extends State<PlayerDetailScreen> {
 
       perVideo.add({
         'name': (v['originalName'] ?? v['filename'] ?? 'Match $analyzed').toString(),
+        'date': (v['createdAt'] ?? v['uploadedAt'] ?? v['date'] ?? '').toString(),
+        'videoId': (v['_id'] ?? v['id'])?.toString() ?? '',
+        'video': Map<String, dynamic>.from(v),
         'distance': d, 'maxSpeed': ms,
         'avgSpeed': avgS > 0 ? avgS : ms * 0.6,
         'sprints': sp, 'accelPeaks': accelCount,
@@ -254,6 +937,564 @@ class _PlayerDetailScreenState extends State<PlayerDetailScreen> {
     } catch (_) {}
   }
 
+  Map<String, dynamic>? _communicationSummaryFromPlayer(Map<String, dynamic>? player) {
+    if (player == null) return null;
+    final direct = player['communicationQuiz'];
+    if (direct is Map<String, dynamic>) return direct;
+    if (direct is Map) return Map<String, dynamic>.from(direct);
+
+    final communication = player['communication'];
+    if (communication is Map<String, dynamic>) {
+      final summary = communication['summary'];
+      if (summary is Map<String, dynamic>) return summary;
+      if (summary is Map) return Map<String, dynamic>.from(summary);
+    }
+    return null;
+  }
+
+  String? _pickBestVideoIdForReport() {
+    final videos = _dashboard?['videos'];
+    if (videos is! List) return null;
+
+    for (final v in videos) {
+      if (v is! Map) continue;
+      final hasAnalysis = v['lastAnalysis'] is Map;
+      final id = (v['_id'] ?? v['id'])?.toString();
+      if (hasAnalysis && id != null && id.isNotEmpty) return id;
+    }
+
+    for (final v in videos) {
+      if (v is! Map) continue;
+      final id = (v['_id'] ?? v['id'])?.toString();
+      if (id != null && id.isNotEmpty) return id;
+    }
+
+    return null;
+  }
+
+  Future<bool> _createScouterReport({
+    required String title,
+    required String notes,
+    bool showFeedback = true,
+  }) async {
+    final player = _player;
+    final playerId = (player?['_id'] ?? player?['id'])?.toString() ?? '';
+    if (playerId.isEmpty) {
+      if (!mounted) return false;
+      if (showFeedback) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Missing player id'), backgroundColor: Color(0xFFEF4444)),
+        );
+      }
+      return false;
+    }
+
+    final token = await AuthStorage.loadToken();
+    if (token == null || !mounted) return false;
+
+    try {
+      final videoId = _pickBestVideoIdForReport();
+      final stats = _computeFifaStats((player?['position'] ?? 'CM').toString());
+
+      final payload = <String, dynamic>{
+        'playerId': playerId,
+        'title': title.trim(),
+        'notes': notes.trim(),
+        'cardSnapshot': {
+          'ovr': stats.ovr,
+          'pac': stats.pac,
+          'sho': stats.sho,
+          'pas': stats.pas,
+          'dri': stats.dri,
+          'def': stats.def,
+          'phy': stats.phy,
+        },
+      };
+      if (videoId != null) payload['videoId'] = videoId;
+
+      final uri = Uri.parse('${ApiConfig.baseUrl}/reports');
+      final res = await http.post(
+        uri,
+        headers: {
+          'Authorization': 'Bearer $token',
+          'Content-Type': 'application/json',
+        },
+        body: jsonEncode(payload),
+      );
+
+      if (res.statusCode >= 400) {
+        final body = res.body;
+        throw Exception(body.isNotEmpty ? body : 'Failed to create report');
+      }
+
+      if (!mounted) return false;
+      if (showFeedback) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Report created successfully'), backgroundColor: Color(0xFF16A34A)),
+        );
+      }
+      return true;
+    } catch (e) {
+      if (!mounted) return false;
+      if (showFeedback) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not create report: ${e.toString().replaceFirst('Exception: ', '')}'), backgroundColor: const Color(0xFFEF4444)),
+        );
+      }
+      return false;
+    }
+  }
+
+  Future<void> _downloadPdf() async {
+    if (_exportingPdf) return;
+    setState(() => _exportingPdf = true);
+    try {
+      final bytes = await _buildProfessionalPdfBytes();
+      final playerName = (_player?['displayName'] ?? _player?['email'] ?? 'Player').toString();
+      final safeName = playerName.replaceAll(RegExp(r'[^a-zA-Z0-9_]'), '_');
+      final fileName = 'ScoutAI_Report_$safeName.pdf';
+
+      final didWebDownload = await triggerPdfDownload(bytes, fileName);
+      if (didWebDownload) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('PDF downloaded: $fileName'), backgroundColor: const Color(0xFF16A34A)),
+        );
+        return;
+      }
+
+      final saved = await FilePicker.platform.saveFile(
+        dialogTitle: 'Save scouting report as PDF',
+        fileName: fileName,
+        type: FileType.custom,
+        allowedExtensions: ['pdf'],
+        bytes: bytes,
+      );
+
+      if (!mounted) return;
+      if (saved == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Download canceled')),
+        );
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('PDF downloaded: $fileName'), backgroundColor: const Color(0xFF16A34A)),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('PDF download error: $e'), backgroundColor: const Color(0xFFEF4444)),
+      );
+    } finally {
+      if (mounted) setState(() => _exportingPdf = false);
+    }
+  }
+
+  Future<Uint8List> _buildProfessionalPdfBytes() async {
+    final player = _player;
+    final name = (player?['displayName'] ?? player?['email'] ?? 'Player').toString();
+    final position = (player?['position'] ?? 'CM').toString();
+    final nation = (player?['nation'] ?? '').toString();
+    final email = (player?['email'] ?? '').toString();
+    final height = (player?['height'] ?? player?['heightCm'] ?? '').toString();
+    final dob = (player?['dateOfBirth'] as String?)?.trim() ?? '';
+
+    int? age;
+    if (dob.isNotEmpty) {
+      final parsed = DateTime.tryParse(dob);
+      if (parsed != null) {
+        final now = DateTime.now();
+        age = now.year - parsed.year;
+        if (now.month < parsed.month || (now.month == parsed.month && now.day < parsed.day)) age--;
+      }
+    }
+
+    final analyzed = (_aggStats['matchesAnalyzed'] as num? ?? 0).toInt();
+    final totalDist = (_aggStats['totalDistance'] as num? ?? 0).toDouble();
+    final avgDist = (_aggStats['avgDistPerMatch'] as num? ?? 0).toDouble();
+    final topSpeed = (_aggStats['maxSpeed'] as num? ?? 0).toDouble();
+    final avgSpeed = (_aggStats['avgSpeed'] as num? ?? 0).toDouble();
+    final totalSprints = (_aggStats['totalSprints'] as num? ?? 0).toInt();
+    final bestDist = (_aggStats['bestDistance'] as num? ?? 0).toDouble();
+    final bestSpeed = (_aggStats['bestAvgSpeed'] as num? ?? 0).toDouble();
+    final bestSprints = (_aggStats['bestSprints'] as num? ?? 0).toInt();
+
+    final hasZones = _aggStats['hasZones'] == true;
+    final walk = (_aggStats['avgWalkPct'] as num? ?? 0).toDouble();
+    final jog = (_aggStats['avgJogPct'] as num? ?? 0).toDouble();
+    final run = (_aggStats['avgRunPct'] as num? ?? 0).toDouble();
+    final high = (_aggStats['avgHighPct'] as num? ?? 0).toDouble();
+    final spr = (_aggStats['avgSprintPct'] as num? ?? 0).toDouble();
+
+    final hasWorkRate = _aggStats['hasWorkRate'] == true;
+    final workRate = (_aggStats['avgWorkRate'] as num? ?? 0).toDouble();
+    final activity = (_aggStats['avgMovingRatio'] as num? ?? 0).toDouble();
+    final dirChanges = (_aggStats['avgDirChanges'] as num? ?? 0).toDouble();
+
+    final fifaStats = _computeFifaStats(position.isNotEmpty ? position : 'CM');
+    final mentalReadiness = analyzed > 0 ? ((fifaStats.ovr / 99) * 100).round().clamp(0, 100) : 0;
+    final trendRows = _perVideo.take(8).toList();
+    final now = DateTime.now();
+    String fmt1(double v) => v.toStringAsFixed(1);
+    String fmtKm(double meters) => '${(meters / 1000).toStringAsFixed(2)} km';
+
+    final doc = pw.Document();
+    final portrait = _portraitBytes != null && _portraitBytes!.isNotEmpty ? pw.MemoryImage(_portraitBytes!) : null;
+
+    pw.Widget title(String t) => pw.Padding(
+      padding: const pw.EdgeInsets.only(top: 10, bottom: 6),
+      child: pw.Text(t, style: pw.TextStyle(fontSize: 12, fontWeight: pw.FontWeight.bold, color: PdfColor.fromInt(0xFF0F172A))),
+    );
+
+    pw.Widget paragraph(String text) => pw.Text(
+      text,
+      style: const pw.TextStyle(fontSize: 10, color: PdfColor.fromInt(0xFF334155), lineSpacing: 2),
+    );
+
+    pw.Widget infoRow(String k, String v) => pw.Padding(
+      padding: const pw.EdgeInsets.only(bottom: 4),
+      child: pw.Row(children: [
+        pw.SizedBox(width: 110, child: pw.Text(k, style: const pw.TextStyle(fontSize: 10, color: PdfColor.fromInt(0xFF475569)))),
+        pw.Expanded(child: pw.Text(v, style: pw.TextStyle(fontSize: 10, fontWeight: pw.FontWeight.bold, color: PdfColor.fromInt(0xFF0F172A)))),
+      ]),
+    );
+
+    doc.addPage(
+      pw.MultiPage(
+        pageTheme: pw.PageTheme(
+          pageFormat: PdfPageFormat.a4,
+          margin: const pw.EdgeInsets.fromLTRB(28, 28, 28, 32),
+        ),
+        header: (_) => pw.Container(
+          padding: const pw.EdgeInsets.only(bottom: 8),
+          decoration: const pw.BoxDecoration(border: pw.Border(bottom: pw.BorderSide(color: PdfColor.fromInt(0xFFE2E8F0)))),
+          child: pw.Row(
+            mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+            children: [
+              pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
+                pw.Text('SCOUTAI PROFESSIONAL REPORT', style: pw.TextStyle(fontSize: 13, fontWeight: pw.FontWeight.bold, color: PdfColor.fromInt(0xFF0F172A))),
+                pw.Text('Player scouting dossier', style: const pw.TextStyle(fontSize: 9, color: PdfColor.fromInt(0xFF64748B))),
+              ]),
+              pw.Text('${now.day.toString().padLeft(2, '0')}/${now.month.toString().padLeft(2, '0')}/${now.year}', style: const pw.TextStyle(fontSize: 9, color: PdfColor.fromInt(0xFF64748B))),
+            ],
+          ),
+        ),
+        footer: (ctx) => pw.Align(
+          alignment: pw.Alignment.centerRight,
+          child: pw.Text('Page ${ctx.pageNumber}', style: const pw.TextStyle(fontSize: 9, color: PdfColor.fromInt(0xFF64748B))),
+        ),
+        build: (_) => [
+          title('1. Executive Summary'),
+          paragraph('This report provides a complete technical overview of the player profile, physical output, movement behavior, and match-by-match performance derived from analyzed video data.'),
+
+          pw.SizedBox(height: 10),
+          pw.Container(
+            padding: const pw.EdgeInsets.all(12),
+            decoration: pw.BoxDecoration(
+              color: PdfColor.fromInt(0xFFF8FAFC),
+              border: pw.Border.all(color: PdfColor.fromInt(0xFFE2E8F0)),
+              borderRadius: const pw.BorderRadius.all(pw.Radius.circular(8)),
+            ),
+            child: pw.Row(
+              crossAxisAlignment: pw.CrossAxisAlignment.start,
+              children: [
+                pw.Container(
+                  width: 62,
+                  height: 62,
+                  decoration: pw.BoxDecoration(
+                    borderRadius: const pw.BorderRadius.all(pw.Radius.circular(31)),
+                    border: pw.Border.all(color: PdfColor.fromInt(0xFFCBD5E1)),
+                  ),
+                  child: portrait != null
+                      ? pw.ClipRRect(horizontalRadius: 31, verticalRadius: 31, child: pw.Image(portrait, fit: pw.BoxFit.cover))
+                      : pw.Center(child: pw.Text(name.isNotEmpty ? name[0].toUpperCase() : 'P')),
+                ),
+                pw.SizedBox(width: 12),
+                pw.Expanded(
+                  child: pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
+                    pw.Text(name, style: pw.TextStyle(fontSize: 18, fontWeight: pw.FontWeight.bold, color: PdfColor.fromInt(0xFF0F172A))),
+                    pw.SizedBox(height: 6),
+                    infoRow('Position', position),
+                    if (nation.isNotEmpty) infoRow('Nationality', nation),
+                    if (age != null) infoRow('Age', '$age years'),
+                    if (height.isNotEmpty) infoRow('Height', '$height cm'),
+                    if (email.isNotEmpty) infoRow('Email', email),
+                    infoRow('Overall Rating (OVR)', '${fifaStats.ovr}'),
+                  ]),
+                ),
+              ],
+            ),
+          ),
+
+          title('2. Performance Overview'),
+          paragraph('Key performance indicators aggregate all analyzed matches and summarize physical intensity, distance output, and speed profile.'),
+          pw.SizedBox(height: 8),
+          pw.TableHelper.fromTextArray(
+            headerStyle: pw.TextStyle(fontWeight: pw.FontWeight.bold, color: PdfColor.fromInt(0xFF0F172A)),
+            headerDecoration: const pw.BoxDecoration(color: PdfColor.fromInt(0xFFE2E8F0)),
+            cellStyle: const pw.TextStyle(fontSize: 10, color: PdfColor.fromInt(0xFF1E293B)),
+            cellAlignment: pw.Alignment.centerLeft,
+            cellPadding: const pw.EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+            headers: const ['Metric', 'Value', 'Interpretation'],
+            data: [
+              ['Matches analyzed', '$analyzed', 'Volume of validated match data used for this report.'],
+              ['Total distance', fmtKm(totalDist), 'Global running load across all analyzed matches.'],
+              ['Average distance / match', fmtKm(avgDist), 'Typical physical volume per match.'],
+              ['Top speed', '${fmt1(topSpeed)} km/h', 'Peak velocity reached during the analyzed period.'],
+              ['Average speed', '${fmt1(avgSpeed)} km/h', 'Sustained movement intensity over match duration.'],
+              ['Total sprints', '$totalSprints', 'High-intensity acceleration events counted as sprints.'],
+            ],
+          ),
+
+          title('3. Technical Profile (FIFA-style attributes)'),
+          paragraph('The following scores reflect the best analyzed outputs translated into standardized football attributes.'),
+          pw.SizedBox(height: 6),
+          pw.TableHelper.fromTextArray(
+            headerStyle: pw.TextStyle(fontWeight: pw.FontWeight.bold, color: PdfColor.fromInt(0xFF0F172A)),
+            headerDecoration: const pw.BoxDecoration(color: PdfColor.fromInt(0xFFE2E8F0)),
+            headers: const ['Attribute', 'Score'],
+            data: [
+              ['Pace (PAC)', '${fifaStats.pac}'],
+              ['Shooting (SHO)', '${fifaStats.sho}'],
+              ['Passing (PAS)', '${fifaStats.pas}'],
+              ['Dribbling (DRI)', '${fifaStats.dri}'],
+              ['Defending (DEF)', '${fifaStats.def}'],
+              ['Physical (PHY)', '${fifaStats.phy}'],
+            ],
+          ),
+          paragraph('Radar interpretation: the player profile shows strongest output in pace, passing, and defensive contribution, with balanced dribbling and physical consistency.'),
+
+          title('4. Match Readiness & Speed Trend'),
+          paragraph('This section reflects current readiness level and short-term speed trend extracted from recent analyzed matches.'),
+          pw.SizedBox(height: 6),
+          pw.TableHelper.fromTextArray(
+            headerStyle: pw.TextStyle(fontWeight: pw.FontWeight.bold, color: PdfColor.fromInt(0xFF0F172A)),
+            headerDecoration: const pw.BoxDecoration(color: PdfColor.fromInt(0xFFE2E8F0)),
+            headers: const ['Indicator', 'Value', 'Description'],
+            data: [
+              ['Mental readiness', '$mentalReadiness%', 'Readiness proxy based on overall rating consistency.'],
+              ['Matches in trend window', '${trendRows.length}', 'Recent matches considered for short-term speed trend.'],
+              ['Recent avg speed', trendRows.isNotEmpty ? '${fmt1((trendRows.first['avgSpeed'] as num? ?? 0).toDouble())} km/h' : 'No data', 'Most recent analyzed average speed value.'],
+              ['Recent top speed', trendRows.isNotEmpty ? '${fmt1((trendRows.first['maxSpeed'] as num? ?? 0).toDouble())} km/h' : 'No data', 'Most recent analyzed maximum speed value.'],
+            ],
+          ),
+          if (trendRows.isNotEmpty) ...[
+            pw.SizedBox(height: 6),
+            pw.TableHelper.fromTextArray(
+              headerStyle: pw.TextStyle(fontWeight: pw.FontWeight.bold, color: PdfColor.fromInt(0xFF0F172A)),
+              headerDecoration: const pw.BoxDecoration(color: PdfColor.fromInt(0xFFE2E8F0)),
+              headers: const ['Match', 'Avg Speed', 'Top Speed'],
+              data: trendRows.map((v) {
+                final n = (v['name'] ?? 'Match').toString();
+                final short = n.length > 30 ? '${n.substring(0, 27)}...' : n;
+                return [
+                  short,
+                  '${fmt1((v['avgSpeed'] as num? ?? 0).toDouble())} km/h',
+                  '${fmt1((v['maxSpeed'] as num? ?? 0).toDouble())} km/h',
+                ];
+              }).toList(),
+            ),
+          ],
+
+          title('5. Movement and Intensity Analysis'),
+          paragraph('Movement zones and workload metrics provide tactical and physiological context to the raw performance figures.'),
+          pw.SizedBox(height: 6),
+          pw.TableHelper.fromTextArray(
+            headerStyle: pw.TextStyle(fontWeight: pw.FontWeight.bold, color: PdfColor.fromInt(0xFF0F172A)),
+            headerDecoration: const pw.BoxDecoration(color: PdfColor.fromInt(0xFFE2E8F0)),
+            headers: const ['Category', 'Value'],
+            data: [
+              ['Walking zone', hasZones ? '${fmt1(walk)}%' : 'No data'],
+              ['Jogging zone', hasZones ? '${fmt1(jog)}%' : 'No data'],
+              ['Running zone', hasZones ? '${fmt1(run)}%' : 'No data'],
+              ['High-speed zone', hasZones ? '${fmt1(high)}%' : 'No data'],
+              ['Sprinting zone', hasZones ? '${fmt1(spr)}%' : 'No data'],
+              ['Work rate', hasWorkRate ? '${fmt1(workRate)} m/min' : 'No data'],
+              ['Activity ratio', hasWorkRate ? '${(activity * 100).toStringAsFixed(0)}%' : 'No data'],
+              ['Directional changes', hasWorkRate ? '${fmt1(dirChanges)} /min' : 'No data'],
+            ],
+          ),
+
+          title('6. Tactical Heatmap'),
+          paragraph('The tactical heatmap below is generated from the same aggregated positional grid used in the app view.'),
+          pw.SizedBox(height: 8),
+          _buildPdfHeatmapSection(),
+
+          title('7. Best Match Records'),
+          paragraph('Peak single-match outputs captured in the analyzed dataset.'),
+          pw.SizedBox(height: 6),
+          pw.Bullet(text: 'Best distance: ${fmtKm(bestDist)}'),
+          pw.Bullet(text: 'Best average speed: ${fmt1(bestSpeed)} km/h'),
+          pw.Bullet(text: 'Best sprints in one match: $bestSprints'),
+
+          title('8. Match-by-Match Breakdown'),
+          paragraph('Detailed metrics for each analyzed video entry, including date and core outputs.'),
+          pw.SizedBox(height: 6),
+          pw.TableHelper.fromTextArray(
+            headerStyle: pw.TextStyle(fontWeight: pw.FontWeight.bold, color: PdfColor.fromInt(0xFF0F172A)),
+            headerDecoration: const pw.BoxDecoration(color: PdfColor.fromInt(0xFFE2E8F0)),
+            cellStyle: const pw.TextStyle(fontSize: 9, color: PdfColor.fromInt(0xFF1E293B)),
+            headers: const ['#', 'Video', 'Date', 'Dist (m)', 'Top', 'Avg', 'Spr', 'Acc'],
+            data: _perVideo.asMap().entries.map((entry) {
+              final i = entry.key + 1;
+              final v = entry.value;
+              final rawName = (v['name'] ?? 'Match $i').toString();
+              final date = _formatVideoDate((v['date'] ?? '').toString());
+              final shortName = rawName.length > 36 ? '${rawName.substring(0, 33)}...' : rawName;
+              return [
+                '$i',
+                shortName,
+                date,
+                (v['distance'] as num? ?? 0).toStringAsFixed(0),
+                (v['maxSpeed'] as num? ?? 0).toStringAsFixed(1),
+                (v['avgSpeed'] as num? ?? 0).toStringAsFixed(1),
+                '${v['sprints'] ?? 0}',
+                '${v['accelPeaks'] ?? 0}',
+              ];
+            }).toList(),
+          ),
+        ],
+      ),
+    );
+
+    return doc.save();
+  }
+
+  pw.Widget _buildPdfHeatmapSection() {
+    if (_heatCounts == null || _heatCounts!.isEmpty || _heatGridW <= 0 || _heatGridH <= 0) {
+      return pw.Container(
+        padding: const pw.EdgeInsets.all(10),
+        decoration: pw.BoxDecoration(
+          color: PdfColor.fromInt(0xFFF8FAFC),
+          border: pw.Border.all(color: PdfColor.fromInt(0xFFE2E8F0)),
+          borderRadius: const pw.BorderRadius.all(pw.Radius.circular(8)),
+        ),
+        child: pw.Text('No tactical heatmap data available.'),
+      );
+    }
+
+    final raw = _heatCounts!;
+    final srcH = raw.length;
+    final srcW = raw.first.length;
+    const outW = 36;
+    const outH = 24;
+
+    double sampleBilinear(double x, double y) {
+      final x0 = x.floor().clamp(0, srcW - 1);
+      final y0 = y.floor().clamp(0, srcH - 1);
+      final x1 = (x0 + 1).clamp(0, srcW - 1);
+      final y1 = (y0 + 1).clamp(0, srcH - 1);
+      final dx = (x - x0).clamp(0.0, 1.0);
+      final dy = (y - y0).clamp(0.0, 1.0);
+
+      final v00 = raw[y0][x0];
+      final v10 = raw[y0][x1];
+      final v01 = raw[y1][x0];
+      final v11 = raw[y1][x1];
+
+      final top = v00 * (1 - dx) + v10 * dx;
+      final bot = v01 * (1 - dx) + v11 * dx;
+      return top * (1 - dy) + bot * dy;
+    }
+
+    final reduced = List.generate(outH, (_) => List.filled(outW, 0.0));
+    for (int r = 0; r < outH; r++) {
+      for (int c = 0; c < outW; c++) {
+        final sx = (c / (outW - 1)) * (srcW - 1);
+        final sy = (r / (outH - 1)) * (srcH - 1);
+        reduced[r][c] = sampleBilinear(sx, sy);
+      }
+    }
+
+    // Light smoothing for a more natural heatmap look in PDF.
+    final smoothed = List.generate(outH, (_) => List.filled(outW, 0.0));
+    for (int r = 0; r < outH; r++) {
+      for (int c = 0; c < outW; c++) {
+        double acc = 0;
+        int n = 0;
+        for (int dr = -1; dr <= 1; dr++) {
+          for (int dc = -1; dc <= 1; dc++) {
+            final rr = r + dr;
+            final cc = c + dc;
+            if (rr < 0 || rr >= outH || cc < 0 || cc >= outW) continue;
+            acc += reduced[rr][cc];
+            n++;
+          }
+        }
+        smoothed[r][c] = n > 0 ? (acc / n) : reduced[r][c];
+      }
+    }
+
+    double maxVal = 0;
+    for (final row in smoothed) {
+      for (final v in row) {
+        if (v > maxVal) maxVal = v;
+      }
+    }
+    if (maxVal <= 0) maxVal = 1;
+
+    return pw.Container(
+      height: 180,
+      padding: const pw.EdgeInsets.all(8),
+      decoration: pw.BoxDecoration(
+        color: PdfColor.fromInt(0xFFF8FAFC),
+        border: pw.Border.all(color: PdfColor.fromInt(0xFFE2E8F0)),
+        borderRadius: const pw.BorderRadius.all(pw.Radius.circular(8)),
+      ),
+      child: pw.Center(
+        child: pw.Container(
+          width: 540,
+          height: 350,
+          child: pw.FittedBox(
+            fit: pw.BoxFit.contain,
+            child: pw.Container(
+              width: 108,
+              height: 72,
+              child: pw.Stack(
+                children: [
+                  pw.Container(color: const PdfColor.fromInt(0xFF2E7D32)),
+                  pw.Column(
+                    children: [
+                      for (int r = 0; r < outH; r++)
+                        pw.Row(
+                          children: [
+                            for (int c = 0; c < outW; c++)
+                              pw.Container(
+                                width: 3,
+                                height: 3,
+                                color: _pdfHeatColor(smoothed[r][c] / maxVal),
+                              ),
+                          ],
+                        ),
+                    ],
+                  ),
+                  // Pitch lines overlay
+                  pw.Positioned(left: 1, top: 1, child: pw.Container(width: 106, height: 70, decoration: pw.BoxDecoration(border: pw.Border.all(color: const PdfColor.fromInt(0xCCFFFFFF), width: 0.6)))),
+                  pw.Positioned(left: 54, top: 1, child: pw.Container(width: 0.6, height: 70, color: const PdfColor.fromInt(0xCCFFFFFF))),
+                  pw.Positioned(left: 47, top: 29, child: pw.Container(width: 14, height: 14, decoration: pw.BoxDecoration(border: pw.Border.all(color: const PdfColor.fromInt(0xCCFFFFFF), width: 0.5), borderRadius: const pw.BorderRadius.all(pw.Radius.circular(7))))),
+                  pw.Positioned(left: 1, top: 22, child: pw.Container(width: 17, height: 28, decoration: pw.BoxDecoration(border: pw.Border.all(color: const PdfColor.fromInt(0xCCFFFFFF), width: 0.5)))),
+                  pw.Positioned(left: 90, top: 22, child: pw.Container(width: 17, height: 28, decoration: pw.BoxDecoration(border: pw.Border.all(color: const PdfColor.fromInt(0xCCFFFFFF), width: 0.5)))),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  PdfColor _pdfHeatColor(double t) {
+    final v = t.clamp(0.0, 1.0);
+    if (v < 0.2) return const PdfColor.fromInt(0xFF4CAF50);
+    if (v < 0.4) return const PdfColor.fromInt(0xFF8BC34A);
+    if (v < 0.6) return const PdfColor.fromInt(0xFFFFEB3B);
+    if (v < 0.8) return const PdfColor.fromInt(0xFFFF9800);
+    return const PdfColor.fromInt(0xFFF44336);
+  }
+
+
+
   double _toDouble(dynamic v) {
     if (v is num) return v.toDouble();
     if (v is String) return double.tryParse(v) ?? 0;
@@ -269,7 +1510,11 @@ class _PlayerDetailScreenState extends State<PlayerDetailScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final player = _player;
+    final dashboardPlayerRaw = _dashboard?['player'];
+    final dashboardPlayer = dashboardPlayerRaw is Map
+        ? Map<String, dynamic>.from(dashboardPlayerRaw)
+        : null;
+    final player = dashboardPlayer ?? _player;
     final name = (player?['displayName'] ?? player?['email'] ?? 'Player').toString();
     final position = (player?['position'] ?? '').toString();
     final nation = (player?['nation'] ?? '').toString();
@@ -279,20 +1524,73 @@ class _PlayerDetailScreenState extends State<PlayerDetailScreen> {
     final avgSpeed = (_aggStats['avgSpeed'] as num? ?? 0).toDouble();
     final totalDist = (_aggStats['totalDistance'] as num? ?? 0).toDouble();
     final avgDist = (_aggStats['avgDistPerMatch'] as num? ?? 0).toDouble();
+    final totalBreakdownPages = (_perVideo.length / _breakdownPerPage).ceil().clamp(1, 999999);
+    final activeBreakdownPage = _breakdownPage.clamp(1, totalBreakdownPages);
+    final breakdownSlice = _pageSlice(_perVideo, activeBreakdownPage, _breakdownPerPage);
+    final breakdownStartIndex = (activeBreakdownPage - 1) * _breakdownPerPage;
+    final readinessPct = analyzed > 0 ? (fifaStats.ovr / 99).clamp(0.0, 1.0) : 0.0;
+    final verificationStatus = (_workflow?['verificationStatus'] ?? '').toString();
 
     return GradientScaffold(
       appBar: AppBar(
-        title: Text(name, overflow: TextOverflow.ellipsis),
+        title: Text(
+          name,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(fontWeight: FontWeight.w900, letterSpacing: 0.3),
+        ),
         actions: [
+          IconButton(
+            onPressed: _loading || _workflowBusy ? null : _requestExpertVerification,
+            tooltip: verificationStatus == 'pending_expert'
+                ? 'Request Expert Verification Again'
+                : 'Request Expert Verification',
+            style: IconButton.styleFrom(
+              backgroundColor: const Color(0x1A32D583),
+              side: const BorderSide(color: Color(0x5032D583)),
+            ),
+            icon: Icon(
+              verificationStatus == 'pending_expert' ? Icons.notifications_active_rounded : Icons.verified_user_outlined,
+              color: const Color(0xFF32D583),
+            ),
+          ),
+          IconButton(
+            onPressed: _exportingPdf || _loading ? null : _downloadPdf,
+            tooltip: 'Download PDF Report',
+            style: IconButton.styleFrom(
+              backgroundColor: const Color(0x223B82F6),
+              side: const BorderSide(color: Color(0x503B82F6)),
+            ),
+            icon: _exportingPdf
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                  )
+                : const Icon(Icons.download_rounded, color: Colors.white),
+          ),
           // ── Challenges button ──
           IconButton(
             onPressed: () => _showChallengesSheet(context),
             tooltip: 'View Challenges',
+            style: IconButton.styleFrom(
+              backgroundColor: const Color(0x22FFD740),
+              side: const BorderSide(color: Color(0x55FFD740)),
+            ),
             icon: const Icon(Icons.emoji_events_outlined, color: Color(0xFFFFD740)),
           ),
           // ── Follow / Unfollow ──
           IconButton(
             onPressed: _toggleFavorite,
+            style: IconButton.styleFrom(
+              backgroundColor: _isFavorite
+                  ? const Color(0x33FF4D6D)
+                  : const Color(0x22FFFFFF),
+              side: BorderSide(
+                color: _isFavorite
+                    ? const Color(0x66FF4D6D)
+                    : const Color(0x44FFFFFF),
+              ),
+            ),
             icon: Icon(
               _isFavorite ? Icons.favorite : Icons.favorite_border,
               color: _isFavorite ? Colors.redAccent : Colors.white,
@@ -305,87 +1603,211 @@ class _PlayerDetailScreenState extends State<PlayerDetailScreen> {
           ? const Center(child: CircularProgressIndicator())
           : _error != null
               ? Center(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(_error!, style: const TextStyle(color: AppColors.danger)),
-                      const SizedBox(height: 12),
-                      OutlinedButton(onPressed: _loadDashboard, child: Text(S.of(context).retry)),
-                    ],
+                  child: SingleChildScrollView(
+                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          _error!,
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(color: AppColors.danger),
+                        ),
+                        const SizedBox(height: 12),
+                        OutlinedButton(
+                          onPressed: _loadDashboard,
+                          style: OutlinedButton.styleFrom(
+                            foregroundColor: Colors.white,
+                            side: const BorderSide(color: Color(0x883B82F6)),
+                            backgroundColor: const Color(0x1A3B82F6),
+                            padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+                          ),
+                          child: Text(
+                            S.of(context).retry,
+                            style: const TextStyle(fontWeight: FontWeight.w800),
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 )
               : ListView(
                   padding: const EdgeInsets.fromLTRB(16, 8, 16, 28),
                   children: [
+                    if (_subscriptionExpired)
+                      _card(
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Icon(Icons.warning_amber_rounded, color: Color(0xFFFFC107)),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  const Text(
+                                    'Subscription required',
+                                    style: TextStyle(
+                                      color: Colors.white,
+                                      fontWeight: FontWeight.w800,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 4),
+                                  Text(
+                                    (_subscriptionMessage?.isNotEmpty ?? false)
+                                        ? _subscriptionMessage!
+                                        : 'Subscription expired. Renew to access full player dashboard data.',
+                                    style: const TextStyle(color: Colors.white70),
+                                  ),
+                                  const SizedBox(height: 10),
+                                  OutlinedButton.icon(
+                                    onPressed: () => Navigator.of(context).pushNamed('/profile'),
+                                    icon: const Icon(Icons.credit_card),
+                                    label: const Text('Renew Subscription'),
+                                    style: OutlinedButton.styleFrom(
+                                      foregroundColor: const Color(0xFFFFD740),
+                                      side: const BorderSide(color: Color(0x88FFD740)),
+                                      backgroundColor: const Color(0x1AFFD740),
+                                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                                      textStyle: const TextStyle(fontWeight: FontWeight.w800),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    if (_subscriptionExpired) const SizedBox(height: 14),
+
                     // ═══════════ PLAYER CARD ═══════════
-                    LegendaryPlayerCard(
-                      name: name,
-                      stats: fifaStats,
-                      position: position.isNotEmpty ? position : 'CM',
-                      nation: nation,
-                      portraitBytes: _portraitBytes,
+                    _staggerItem(
+                      order: 0,
+                      child: LegendaryPlayerCard(
+                        name: name,
+                        stats: fifaStats,
+                        position: position.isNotEmpty ? position : 'CM',
+                        nation: nation,
+                        portraitBytes: _portraitBytes,
+                      ),
                     ),
                     const SizedBox(height: 16),
 
                     // ═══════════ PLAYER INFO (scouter view) ═══════════
-                    _PlayerInfoCard(player: player, fifaStats: fifaStats),
+                    _staggerItem(
+                      order: 1,
+                      child: _PlayerInfoCard(player: player, fifaStats: fifaStats),
+                    ),
+                    const SizedBox(height: 14),
+                    _staggerItem(
+                      order: 2,
+                      child: _CommunicationResultCard(summary: _communicationSummaryFromPlayer(player)),
+                    ),
                     const SizedBox(height: 20),
 
-                    // ═══════════ PLAYER RADAR ═══════════
-                    _sectionHeader(Icons.hexagon_outlined, 'PLAYER RADAR'),
+                    // ═══════════ SWIPE PERFORMANCE STEPPER ═══════════
+                    _sectionHeader(Icons.swipe, 'PERFORMANCE STEPPER'),
+                    const SizedBox(height: 6),
+                    Text(
+                      'Swipe left or right to navigate: Performance Score -> Match Readiness -> Player Radar -> Speed Timeline',
+                      style: const TextStyle(color: _kTextM, fontSize: 12, fontWeight: FontWeight.w600),
+                    ),
                     const SizedBox(height: 10),
-                    _card(child: Column(children: [
-                      SizedBox(height: 220, width: 220, child: CustomPaint(painter: _RadarPainter(stats: fifaStats), size: const Size(220, 220))),
-                      const SizedBox(height: 8),
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 7),
-                        decoration: BoxDecoration(color: _kAccent, borderRadius: BorderRadius.circular(20)),
-                        child: Text('OVR ${fifaStats.ovr}', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w900, fontSize: 15, letterSpacing: 1)),
+                    SizedBox(
+                      height: 340,
+                      child: PageView(
+                        controller: _performanceStepperController,
+                        onPageChanged: (index) => setState(() => _performanceStep = index),
+                        children: [
+                          _card(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                            _sectionHeader(Icons.analytics_outlined, 'PERFORMANCE SCORE'),
+                            const SizedBox(height: 14),
+                            _metricBar('Endurance', (avgDist > 100 ? (avgDist / 12000.0) : (avgDist / 12.0)).clamp(0.0, 1.0)),
+                            const SizedBox(height: 8),
+                            _metricBar('Top Speed', (topSpeed / 35.0).clamp(0.0, 1.0)),
+                            const SizedBox(height: 8),
+                            _metricBar('Intensity', ((_aggStats['avgSprintsPerMatch'] as num? ?? 0).toDouble() / 25.0).clamp(0.0, 1.0)),
+                            const SizedBox(height: 8),
+                            _metricBar('Agility', (((_aggStats['totalAccelPeaks'] as num? ?? 0).toDouble() / (analyzed == 0 ? 1 : analyzed)) / 30.0).clamp(0.0, 1.0)),
+                            const SizedBox(height: 8),
+                            _metricBar('Work Rate', (((_aggStats['avgWorkRate'] as num? ?? 0).toDouble()) / 150.0).clamp(0.0, 1.0)),
+                          ])),
+                          _card(child: Column(children: [
+                            _sectionHeader(Icons.flash_on, 'MATCH READINESS'),
+                            const SizedBox(height: 10),
+                            Row(children: [
+                              Expanded(child: _card(child: Column(children: [
+                                const SizedBox(height: 4),
+                                SizedBox(
+                                  height: 90, width: 90,
+                                  child: CustomPaint(painter: _MentalRingPainter(pct: readinessPct)),
+                                ),
+                                const SizedBox(height: 8),
+                                const Text('MENTAL', style: TextStyle(color: _kTextM, fontSize: 10, fontWeight: FontWeight.w700, letterSpacing: 1)),
+                              ]))),
+                              const SizedBox(width: 10),
+                              Expanded(child: _card(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                                const Text('SPEED TREND', style: TextStyle(color: _kTextM, fontSize: 10, fontWeight: FontWeight.w700, letterSpacing: 1)),
+                                const SizedBox(height: 8),
+                                SizedBox(
+                                  height: 80, width: double.infinity,
+                                  child: CustomPaint(painter: _MoraleTrendPainter(perVideo: _perVideo)),
+                                ),
+                              ]))),
+                            ]),
+                          ])),
+                          _card(child: Column(children: [
+                            _sectionHeader(Icons.hexagon_outlined, 'PLAYER RADAR'),
+                            const SizedBox(height: 10),
+                            SizedBox(height: 220, width: 220, child: CustomPaint(painter: _RadarPainter(stats: fifaStats), size: const Size(220, 220))),
+                            const SizedBox(height: 8),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 7),
+                              decoration: BoxDecoration(color: _kAccent, borderRadius: BorderRadius.circular(20)),
+                              child: Text('OVR ${fifaStats.ovr}', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w900, fontSize: 15, letterSpacing: 1)),
+                            ),
+                          ])),
+                          _card(child: Column(children: [
+                            _sectionHeader(Icons.speed, 'SPEED TIMELINE'),
+                            const SizedBox(height: 10),
+                            SizedBox(
+                              height: 120,
+                              width: double.infinity,
+                              child: CustomPaint(painter: _MoraleTrendPainter(perVideo: _perVideo)),
+                            ),
+                            const SizedBox(height: 10),
+                            Row(children: [
+                              _speedCard(Icons.flash_on, 'Top Speed', '${topSpeed.toStringAsFixed(1)} km/h', _kGreen),
+                              const SizedBox(width: 10),
+                              _speedCard(Icons.map, 'Total Distance', '${totalDist.toStringAsFixed(1)} m', _kAccent),
+                            ]),
+                            const SizedBox(height: 10),
+                            Row(children: [
+                              _speedCard(Icons.trending_up, 'Avg Speed', '${avgSpeed.toStringAsFixed(1)} km/h', const Color(0xFFFFA726)),
+                              const SizedBox(width: 10),
+                              _speedCard(Icons.straighten, 'Avg Dist/Match', '${avgDist.toStringAsFixed(1)} m', _kAccent),
+                            ]),
+                          ])),
+                        ],
                       ),
-                    ])),
-                    const SizedBox(height: 20),
-
-                    // ═══════════ MATCH READINESS ═══════════
-                    _sectionHeader(Icons.flash_on, 'MATCH READINESS'),
-                    const SizedBox(height: 10),
-                    Row(children: [
-                      Expanded(child: _card(child: Column(children: [
-                        const SizedBox(height: 4),
-                        SizedBox(
-                          height: 90, width: 90,
-                          child: CustomPaint(painter: _MentalRingPainter(
-                            pct: analyzed > 0 ? (fifaStats.ovr / 99).clamp(0.0, 1.0) : 0.0,
-                          )),
-                        ),
-                        const SizedBox(height: 8),
-                        const Text('MENTAL', style: TextStyle(color: _kTextM, fontSize: 10, fontWeight: FontWeight.w700, letterSpacing: 1)),
-                      ]))),
-                      const SizedBox(width: 10),
-                      Expanded(child: _card(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                        const Text('SPEED TREND', style: TextStyle(color: _kTextM, fontSize: 10, fontWeight: FontWeight.w700, letterSpacing: 1)),
-                        const SizedBox(height: 8),
-                        SizedBox(
-                          height: 80, width: double.infinity,
-                          child: CustomPaint(painter: _MoraleTrendPainter(perVideo: _perVideo)),
-                        ),
-                      ]))),
-                    ]),
-                    const SizedBox(height: 20),
-
-                    // ═══════════ SPEED & DISTANCE ═══════════
-                    _sectionHeader(Icons.speed, 'SPEED & DISTANCE'),
-                    const SizedBox(height: 10),
-                    Row(children: [
-                      _speedCard(Icons.flash_on, 'Top Speed', '${topSpeed.toStringAsFixed(1)} km/h', _kGreen),
-                      const SizedBox(width: 10),
-                      _speedCard(Icons.map, 'Total Distance', '${totalDist.toStringAsFixed(1)} m', _kAccent),
-                    ]),
-                    const SizedBox(height: 10),
-                    Row(children: [
-                      _speedCard(Icons.trending_up, 'Avg Speed', '${avgSpeed.toStringAsFixed(1)} km/h', const Color(0xFFFFA726)),
-                      const SizedBox(width: 10),
-                      _speedCard(Icons.straighten, 'Avg Dist/Match', '${avgDist.toStringAsFixed(1)} m', _kAccent),
-                    ]),
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: List.generate(4, (i) {
+                        final selected = i == _performanceStep;
+                        return AnimatedContainer(
+                          duration: const Duration(milliseconds: 180),
+                          margin: const EdgeInsets.symmetric(horizontal: 4),
+                          width: selected ? 18 : 8,
+                          height: 8,
+                          decoration: BoxDecoration(
+                            color: selected ? _kAccent : _kTextM.withValues(alpha: 0.4),
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                        );
+                      }),
+                    ),
                     const SizedBox(height: 20),
 
                     // ═══════════ MOVEMENT ZONES ═══════════
@@ -520,22 +1942,59 @@ class _PlayerDetailScreenState extends State<PlayerDetailScreen> {
                     if (_perVideo.isNotEmpty) ...[
                       _sectionHeader(Icons.table_chart, 'MATCH BREAKDOWN'),
                       const SizedBox(height: 10),
-                      for (int i = 0; i < _perVideo.length; i++) ...[
-                        _matchBreakdown(i + 1, _perVideo[i]),
-                        const SizedBox(height: 8),
-                      ],
+                      GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onHorizontalDragStart: (_) {
+                          _breakdownSwipeDx = 0;
+                          _breakdownSwipeConsumed = false;
+                        },
+                        onHorizontalDragUpdate: (details) {
+                          if (_breakdownSwipeConsumed) return;
+                          _breakdownSwipeDx += details.primaryDelta ?? 0;
+                          if (_breakdownSwipeDx > 30 && activeBreakdownPage < totalBreakdownPages) {
+                            setState(() => _breakdownPage = activeBreakdownPage + 1);
+                            _breakdownSwipeConsumed = true;
+                          } else if (_breakdownSwipeDx < -30 && activeBreakdownPage > 1) {
+                            setState(() => _breakdownPage = activeBreakdownPage - 1);
+                            _breakdownSwipeConsumed = true;
+                          }
+                        },
+                        onHorizontalDragEnd: (details) {
+                          if (_breakdownSwipeConsumed) return;
+                          final vx = details.primaryVelocity ?? 0;
+                          if (vx > 250 && activeBreakdownPage < totalBreakdownPages) {
+                            setState(() => _breakdownPage = activeBreakdownPage + 1);
+                          } else if (vx < -250 && activeBreakdownPage > 1) {
+                            setState(() => _breakdownPage = activeBreakdownPage - 1);
+                          }
+                        },
+                        child: Column(
+                          children: [
+                            for (int i = 0; i < breakdownSlice.length; i++) ...[
+                              _matchBreakdown(breakdownStartIndex + i + 1, breakdownSlice[i] is Map<String, dynamic> ? breakdownSlice[i] as Map<String, dynamic> : <String, dynamic>{}),
+                              const SizedBox(height: 8),
+                            ],
+                            if (_perVideo.length > _breakdownPerPage) ...[
+                              const SizedBox(height: 8),
+                              ListPaginator(
+                                totalItems: _perVideo.length,
+                                itemsPerPage: _breakdownPerPage,
+                                currentPage: activeBreakdownPage,
+                                onPageChanged: (page) => setState(() => _breakdownPage = page),
+                              ),
+                              const SizedBox(height: 6),
+                              const Text(
+                                'Swipe right for next page, swipe left for previous page',
+                                style: TextStyle(color: _kTextM, fontSize: 11, fontWeight: FontWeight.w600),
+                                textAlign: TextAlign.center,
+                              ),
+                            ],
+                          ],
+                        ),
+                      ),
                       const SizedBox(height: 12),
                     ],
 
-                    // ═══════════ VIDEOS ═══════════
-                    _sectionHeader(Icons.videocam, 'MATCH VIDEOS'),
-                    const SizedBox(height: 10),
-                    ..._buildVideoList(),
-                    const SizedBox(height: 20),
-
-                    // ═══════════ SEND VIDEO REQUEST ═══════════
-                    _buildVideoRequestButton(),
-                    const SizedBox(height: 12),
                   ],
                 ),
     );
@@ -549,19 +2008,80 @@ class _PlayerDetailScreenState extends State<PlayerDetailScreen> {
   static const _kGold = Color(0xFFFFD740);
   static const _kTextM = Color(0xFF8899AA);
 
+  Widget _staggerItem({required int order, required Widget child}) {
+    return TweenAnimationBuilder<double>(
+      duration: Duration(milliseconds: 320 + (order * 130)),
+      curve: Curves.easeOutCubic,
+      tween: Tween(begin: 0, end: 1),
+      child: child,
+      builder: (context, value, widget) {
+        return Opacity(
+          opacity: value,
+          child: Transform.translate(
+            offset: Offset(0, 20 * (1 - value)),
+            child: widget,
+          ),
+        );
+      },
+    );
+  }
+
   Widget _sectionHeader(IconData icon, String title) {
-    return Row(children: [
-      Icon(icon, size: 16, color: _kAccent),
-      const SizedBox(width: 8),
-      Text(title, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 13, letterSpacing: 1.6)),
-    ]);
+    return Row(
+      children: [
+        Container(
+          padding: const EdgeInsets.all(7),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(10),
+            gradient: LinearGradient(
+              colors: [
+                _kAccent.withValues(alpha: 0.25),
+                _kAccent.withValues(alpha: 0.08),
+              ],
+            ),
+            border: Border.all(color: _kAccent.withValues(alpha: 0.45)),
+          ),
+          child: Icon(icon, size: 15, color: _kAccent),
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Text(
+            title,
+            style: const TextStyle(
+              color: Colors.white,
+              fontWeight: FontWeight.w900,
+              fontSize: 13.5,
+              letterSpacing: 1.3,
+            ),
+          ),
+        ),
+      ],
+    );
   }
 
   Widget _card({required Widget child}) {
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(color: _kCard, borderRadius: BorderRadius.circular(16)),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(16),
+        gradient: const LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            _kCard,
+            Color(0xFF111A2E),
+          ],
+        ),
+        border: Border.all(color: const Color(0x2AFFFFFF)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.28),
+            blurRadius: 18,
+            offset: const Offset(0, 10),
+          ),
+        ],
+      ),
       child: child,
     );
   }
@@ -569,17 +2089,66 @@ class _PlayerDetailScreenState extends State<PlayerDetailScreen> {
   Widget _speedCard(IconData icon, String label, String value, Color iconColor) {
     return Expanded(child: Container(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
-      decoration: BoxDecoration(color: _kCard, borderRadius: BorderRadius.circular(14)),
+      decoration: BoxDecoration(
+        color: _kCard,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: iconColor.withValues(alpha: 0.28)),
+      ),
       child: Row(children: [
         Icon(icon, size: 18, color: iconColor),
         const SizedBox(width: 10),
         Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text(label, style: const TextStyle(color: _kTextM, fontSize: 11, fontWeight: FontWeight.w600)),
+          Text(
+            label,
+            style: const TextStyle(
+              color: _kTextM,
+              fontSize: 10.5,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0.4,
+            ),
+          ),
           const SizedBox(height: 2),
-          Text(value, style: const TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.w900)),
+          Text(
+            value,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 15.5,
+              fontWeight: FontWeight.w900,
+              letterSpacing: 0.2,
+            ),
+          ),
         ])),
       ]),
     ));
+  }
+
+  Widget _metricBar(String label, double value) {
+    final v = value.clamp(0.0, 1.0);
+    final c = v >= 0.75 ? _kGreen : (v >= 0.45 ? _kGold : const Color(0xFFFF6B6B));
+    return Row(
+      children: [
+        SizedBox(
+          width: 92,
+          child: Text(label, style: const TextStyle(color: _kTextM, fontSize: 12, fontWeight: FontWeight.w700)),
+        ),
+        Expanded(
+          child: Stack(
+            children: [
+              Container(height: 8, decoration: BoxDecoration(color: _kTextM.withValues(alpha: 0.24), borderRadius: BorderRadius.circular(999))),
+              FractionallySizedBox(
+                widthFactor: v,
+                child: Container(height: 8, decoration: BoxDecoration(color: c, borderRadius: BorderRadius.circular(999))),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(width: 8),
+        SizedBox(
+          width: 34,
+          child: Text('${(v * 100).round()}', textAlign: TextAlign.right, style: TextStyle(color: c, fontWeight: FontWeight.w900, fontSize: 12)),
+        ),
+      ],
+    );
   }
 
   Widget _zoneLegend(Color color, String label, double pct) {
@@ -611,37 +2180,66 @@ class _PlayerDetailScreenState extends State<PlayerDetailScreen> {
 
   Widget _matchBreakdown(int index, Map<String, dynamic> data) {
     final name = (data['name'] ?? 'Match $index').toString();
+    final dateText = _formatVideoDate((data['date'] ?? '').toString());
     final dist = (data['distance'] as num? ?? 0).toDouble();
     final maxSpd = (data['maxSpeed'] as num? ?? 0).toDouble();
     final avgSpd = (data['avgSpeed'] as num? ?? 0).toDouble();
     final sprints = (data['sprints'] as int?) ?? 0;
     final accel = (data['accelPeaks'] as int?) ?? 0;
     final cal = data['calibrated'] == true;
+    final vMap = data['video'] is Map ? Map<String, dynamic>.from(data['video'] as Map) : <String, dynamic>{};
 
-    return Container(
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(color: _kCard, borderRadius: BorderRadius.circular(14)),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Row(children: [
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-            decoration: BoxDecoration(color: _kAccent.withValues(alpha: 0.15), borderRadius: BorderRadius.circular(8)),
-            child: Text('#$index', style: const TextStyle(color: _kAccent, fontWeight: FontWeight.w900, fontSize: 12)),
-          ),
-          const SizedBox(width: 10),
-          Expanded(child: Text(name, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 13, color: Colors.white))),
-          Icon(cal ? Icons.verified : Icons.warning_amber_rounded, color: cal ? _kGreen : _kGold, size: 16),
+    return InkWell(
+      borderRadius: BorderRadius.circular(14),
+      onTap: vMap.isEmpty
+          ? null
+          : () => Navigator.of(context).pushNamed('/scouter-video-player', arguments: vMap),
+      child: Container(
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(color: _kCard, borderRadius: BorderRadius.circular(14)),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+              decoration: BoxDecoration(color: _kAccent.withValues(alpha: 0.15), borderRadius: BorderRadius.circular(8)),
+              child: Text('#$index', style: const TextStyle(color: _kAccent, fontWeight: FontWeight.w900, fontSize: 12)),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(name, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 13, color: Colors.white)),
+                  if (dateText.isNotEmpty) ...[
+                    const SizedBox(height: 2),
+                    Text(dateText, style: const TextStyle(color: _kTextM, fontSize: 11, fontWeight: FontWeight.w600)),
+                  ],
+                ],
+              ),
+            ),
+            Icon(cal ? Icons.verified : Icons.warning_amber_rounded, color: cal ? _kGreen : _kGold, size: 16),
+          ]),
+          const SizedBox(height: 14),
+          Row(children: [
+            _miniStat('DIST', '${dist.toStringAsFixed(0)}m', _kAccent),
+            _miniStat('TOP', maxSpd.toStringAsFixed(1), _kGreen),
+            _miniStat('AVG', avgSpd.toStringAsFixed(1), const Color(0xFFFFA726)),
+            _miniStat('SPR', '$sprints', const Color(0xFFEF5350)),
+            _miniStat('ACC', '$accel', _kGold),
+          ]),
         ]),
-        const SizedBox(height: 14),
-        Row(children: [
-          _miniStat('DIST', '${dist.toStringAsFixed(0)}m', _kAccent),
-          _miniStat('TOP', maxSpd.toStringAsFixed(1), _kGreen),
-          _miniStat('AVG', avgSpd.toStringAsFixed(1), const Color(0xFFFFA726)),
-          _miniStat('SPR', '$sprints', const Color(0xFFEF5350)),
-          _miniStat('ACC', '$accel', _kGold),
-        ]),
-      ]),
+      ),
     );
+  }
+
+  String _formatVideoDate(String raw) {
+    if (raw.trim().isEmpty) return '';
+    final dt = DateTime.tryParse(raw);
+    if (dt == null) return raw;
+    final d = dt.day.toString().padLeft(2, '0');
+    final m = dt.month.toString().padLeft(2, '0');
+    final y = dt.year.toString();
+    return '$d/$m/$y';
   }
 
   Widget _miniStat(String label, String value, Color color) {
@@ -652,56 +2250,23 @@ class _PlayerDetailScreenState extends State<PlayerDetailScreen> {
     ]));
   }
 
-  List<Widget> _buildVideoList() {
-    if (_dashboard == null || _dashboard!['videos'] is! List) {
-      return [_card(child: const Text('No data available', style: TextStyle(color: _kTextM)))];
-    }
-    final videos = _dashboard!['videos'] as List;
-    if (videos.isEmpty) {
-      return [_card(child: const Text('No videos uploaded yet', style: TextStyle(color: _kTextM)))];
-    }
-    final widgets = <Widget>[];
-    for (final v in videos) {
-      final vMap = v is Map ? Map<String, dynamic>.from(v) : <String, dynamic>{};
-      widgets.add(_VideoTile(
-        video: vMap,
-        onTap: () {
-          final videoId = (vMap['_id'] ?? vMap['id'])?.toString();
-          if (videoId != null && videoId.isNotEmpty) {
-            Navigator.of(context).pushNamed('/scouter-video-player', arguments: vMap);
-          }
-        },
-      ));
-      widgets.add(const SizedBox(height: 8));
-    }
-    return widgets;
-  }
-
-  Widget _buildVideoRequestButton() {
+  Widget _workflowChip(String label, String value) {
+    final normalized = value.toLowerCase();
+    final color = normalized.contains('verified') || normalized.contains('approved')
+        ? _kGreen
+        : normalized.contains('cancel') || normalized.contains('reject')
+            ? const Color(0xFFEF5350)
+            : _kTextM;
     return Container(
-      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(14),
-        gradient: const LinearGradient(
-          colors: [Color(0xFF8B5CF6), Color(0xFF6366F1)],
-        ),
-        boxShadow: [
-          BoxShadow(
-            color: const Color(0xFF8B5CF6).withValues(alpha: 0.35),
-            blurRadius: 12,
-            offset: const Offset(0, 4),
-          ),
-        ],
+        color: color.withValues(alpha: 0.16),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: color.withValues(alpha: 0.5)),
       ),
-      child: FilledButton.icon(
-        onPressed: _showVideoRequestDialog,
-        icon: const Icon(Icons.videocam_outlined, size: 20),
-        label: const Text('Send Video Request'),
-        style: FilledButton.styleFrom(
-          backgroundColor: Colors.transparent,
-          padding: const EdgeInsets.symmetric(vertical: 14),
-          textStyle: const TextStyle(fontWeight: FontWeight.w800, fontSize: 15),
-        ),
+      child: Text(
+        '$label: $value',
+        style: TextStyle(color: color, fontWeight: FontWeight.w800, fontSize: 11),
       ),
     );
   }
@@ -714,6 +2279,7 @@ class _PlayerDetailScreenState extends State<PlayerDetailScreen> {
       context: context,
       builder: (ctx) {
         bool sending = false;
+        bool alsoCreateReport = false;
         return StatefulBuilder(
           builder: (ctx, setDialogState) {
             return AlertDialog(
@@ -769,6 +2335,24 @@ class _PlayerDetailScreenState extends State<PlayerDetailScreen> {
                       _quickChip(controller, 'Defensive work'),
                     ],
                   ),
+                  const SizedBox(height: 10),
+                  CheckboxListTile(
+                    contentPadding: EdgeInsets.zero,
+                    dense: true,
+                    value: alsoCreateReport,
+                    onChanged: sending
+                        ? null
+                        : (v) => setDialogState(() => alsoCreateReport = v ?? false),
+                    activeColor: const Color(0xFF8B5CF6),
+                    title: const Text(
+                      'Also create scouting report',
+                      style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700),
+                    ),
+                    subtitle: const Text(
+                      'Save this request message into reports for admin/player follow-up.',
+                      style: TextStyle(fontSize: 11),
+                    ),
+                  ),
                 ],
               ),
               actions: [
@@ -784,20 +2368,34 @@ class _PlayerDetailScreenState extends State<PlayerDetailScreen> {
                           if (msg.isEmpty) return;
                           setDialogState(() => sending = true);
                           final success = await _sendVideoRequest(msg);
+                          bool reportCreated = true;
+                          if (alsoCreateReport) {
+                            reportCreated = await _createScouterReport(
+                              title: 'Video Request Follow-up',
+                              notes: msg,
+                              showFeedback: false,
+                            );
+                          }
                           if (!ctx.mounted) return;
                           Navigator.pop(ctx);
                           if (!mounted) return;
-                          if (success) {
+                          if (success && (!alsoCreateReport || reportCreated)) {
+                            final text = alsoCreateReport
+                                ? 'Request sent and scouting report created.'
+                                : 'Video request sent! The player will see it in their notifications.';
                             ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(
-                                content: Text('Video request sent! The player will see it in their notifications.'),
+                              SnackBar(
+                                content: Text(text),
                                 backgroundColor: AppColors.success,
                               ),
                             );
                           } else {
+                            final text = !success
+                                ? 'Failed to send request. Try again.'
+                                : 'Request sent, but report creation failed.';
                             ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(
-                                content: Text('Failed to send request. Try again.'),
+                              SnackBar(
+                                content: Text(text),
                                 backgroundColor: AppColors.danger,
                               ),
                             );
@@ -858,83 +2456,10 @@ class _PlayerDetailScreenState extends State<PlayerDetailScreen> {
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => _ChallengesSheet(playerId: playerId, playerName: name),
-    );
-  }
-}
-
-class _VideoTile extends StatelessWidget {
-  const _VideoTile({required this.video, this.onTap});
-
-  final Map<String, dynamic> video;
-  final VoidCallback? onTap;
-
-  double _extractQuality(Map<String, dynamic> v) {
-    final a = v['lastAnalysis'];
-    if (a is! Map) return 0;
-    final m = a['metrics'];
-    if (m is! Map) return 0;
-    final mov = m['movement'];
-    if (mov is! Map) return 0;
-    return (mov['qualityScore'] as num?)?.toDouble() ?? 0;
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final name = (video['originalName'] ?? video['filename'] ?? 'Video').toString();
-    final hasAnalysis = video['lastAnalysis'] is Map;
-    final isTagged = video['isTagged'] == true;
-    final uploaderName = (video['uploaderName'] ?? '').toString();
-    final quality = _extractQuality(video);
-
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(14),
-      child: GlassCard(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-        child: Row(
-          children: [
-            const Icon(Icons.videocam, color: AppColors.primary, size: 22),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    name,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 14),
-                  ),
-                  if (isTagged && uploaderName.isNotEmpty) ...[
-                    const SizedBox(height: 2),
-                    Text(
-                      'Uploaded by $uploaderName',
-                      style: TextStyle(
-                        color: AppColors.primary.withValues(alpha: 0.8),
-                        fontSize: 11,
-                        fontStyle: FontStyle.italic,
-                      ),
-                    ),
-                  ],
-                ],
-              ),
-            ),
-            if (isTagged)
-              const Padding(
-                padding: EdgeInsets.only(right: 6),
-                child: Icon(Icons.person_pin, color: AppColors.primary, size: 18),
-              ),
-            if (hasAnalysis) ...[_QualityBadge(score: quality > 0 ? quality : 0.65), const SizedBox(width: 6)],
-            if (onTap != null) ...[
-              const Icon(Icons.play_circle_outline, color: AppColors.textMuted, size: 20),
-              const SizedBox(width: 8),
-            ],
-            Pill(
-              label: hasAnalysis ? 'Analyzed' : 'Processing',
-              color: hasAnalysis ? AppColors.success : AppColors.warning,
-            ),
-          ],
-        ),
+      builder: (_) => _ChallengesSheet(
+        playerId: playerId,
+        playerName: name,
+        onSendVideoRequest: _showVideoRequestDialog,
       ),
     );
   }
@@ -1193,31 +2718,6 @@ class _FallbackPitchPainter extends CustomPainter {
   bool shouldRepaint(covariant _FallbackPitchPainter old) => false;
 }
 
-class _QualityBadge extends StatelessWidget {
-  const _QualityBadge({required this.score});
-  final double score;
-
-  @override
-  Widget build(BuildContext context) {
-    final String emoji;
-    final String label;
-    final Color bg;
-    final Color fg;
-    if (score > 0.8) {
-      emoji = '\u2B50'; label = 'Excellent'; bg = const Color(0x30FFD740); fg = const Color(0xFFFFD740);
-    } else if (score > 0.5) {
-      emoji = '\u2705'; label = 'Good'; bg = const Color(0x3000E676); fg = const Color(0xFF00E676);
-    } else {
-      emoji = '\u26A0\uFE0F'; label = 'Low'; bg = const Color(0x30FF7043); fg = const Color(0xFFFF7043);
-    }
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
-      decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(6)),
-      child: Text('$emoji $label', style: TextStyle(color: fg, fontSize: 9, fontWeight: FontWeight.w700)),
-    );
-  }
-}
-
 // ══════════════════════════════════════════════════════════════════════════════
 // PLAYER INFO CARD (scouter view — age, country, position, OVR, height)
 // ══════════════════════════════════════════════════════════════════════════════
@@ -1260,6 +2760,7 @@ class _PlayerInfoCard extends StatelessWidget {
     final position = (player?['position'] as String?)?.toUpperCase() ?? '';
     final country = (player?['nation'] ?? player?['country'] ?? '').toString();
     final flag = country.isNotEmpty ? flagForCountry(country) : '';
+    final isVerified = player?['badgeVerified'] == true;
 
     // Only show card if there's at least some data
     final hasAny = age >= 0 || ht >= 0 || position.isNotEmpty || country.isNotEmpty || fifaStats.ovr > 0;
@@ -1269,25 +2770,45 @@ class _PlayerInfoCard extends StatelessWidget {
       width: double.infinity,
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
       decoration: BoxDecoration(
-        color: _kCard,
+        gradient: const LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            _kCard,
+            Color(0xFF111B31),
+          ],
+        ),
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: _kGold.withValues(alpha: 0.18)),
+        border: Border.all(color: _kGold.withValues(alpha: 0.24)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.22),
+            blurRadius: 16,
+            offset: const Offset(0, 8),
+          ),
+        ],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(children: [
-            const Icon(Icons.person_outline, size: 14, color: _kGold),
+            const Icon(Icons.lock_outline_rounded, size: 14, color: _kGold),
             const SizedBox(width: 6),
             const Text(
-              'PLAYER INFO',
-              style: TextStyle(color: _kGold, fontSize: 11, fontWeight: FontWeight.w800, letterSpacing: 1.4),
+              'PRIVATE INFO',
+              style: TextStyle(
+                color: _kGold,
+                fontSize: 11,
+                fontWeight: FontWeight.w800,
+                letterSpacing: 1.45,
+              ),
             ),
           ]),
           const SizedBox(height: 12),
           Row(children: [
             Expanded(child: _InfoRow(icon: Icons.cake_outlined, label: 'Age',
               value: age >= 0 ? '$age yrs' : '—', missing: age < 0)),
+            const SizedBox(width: 8),
             Expanded(child: _InfoRow(icon: Icons.flag_outlined, label: 'Country',
               value: country.isNotEmpty ? '$flag $country' : '—', missing: country.isEmpty)),
           ]),
@@ -1295,6 +2816,7 @@ class _PlayerInfoCard extends StatelessWidget {
           Row(children: [
             Expanded(child: _InfoRow(icon: Icons.sports_soccer, label: 'Position',
               value: position.isNotEmpty ? position : '—', missing: position.isEmpty)),
+            const SizedBox(width: 8),
             Expanded(child: _InfoRow(
               icon: Icons.star_outline, label: 'Avg Rating',
               value: fifaStats.ovr > 0 ? '${fifaStats.ovr}' : '—',
@@ -1308,8 +2830,140 @@ class _PlayerInfoCard extends StatelessWidget {
           Row(children: [
             Expanded(child: _InfoRow(icon: Icons.height, label: 'Height',
               value: ht >= 0 ? '$ht cm' : '—', missing: ht < 0)),
-            const Expanded(child: SizedBox()),
+            const SizedBox(width: 8),
+            Expanded(
+              child: _InfoRow(
+                icon: isVerified ? Icons.verified_rounded : Icons.pending_rounded,
+                label: 'Verification',
+                value: isVerified ? 'Verified' : 'Pending',
+                missing: false,
+                valueColor: isVerified ? const Color(0xFF00E676) : const Color(0xFFFFB300),
+              ),
+            ),
           ]),
+        ],
+      ),
+    );
+  }
+}
+
+class _CommunicationResultCard extends StatelessWidget {
+  const _CommunicationResultCard({required this.summary});
+
+  final Map<String, dynamic>? summary;
+
+  static const _kCard = Color(0xFF151B2D);
+  static const _kTextM = Color(0xFF9AA3B2);
+
+  @override
+  Widget build(BuildContext context) {
+    final band = (summary?['readinessBand'] ?? summary?['band'] ?? 'Not available').toString();
+    final style = (summary?['communicationStyle'] ?? 'Not available').toString();
+    final captaincy = (summary?['captaincy'] ?? summary?['captaincySummary'] ?? 'Not available').toString();
+    final languages = summary?['languages'];
+    final languageText = languages is List && languages.isNotEmpty
+        ? languages.map((e) => e.toString()).join(', ')
+        : 'Not available';
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            _kCard,
+            Color(0xFF111A2E),
+          ],
+        ),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: const Color(0x283B82F6)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.2),
+            blurRadius: 14,
+            offset: const Offset(0, 8),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              Icon(Icons.record_voice_over_outlined, color: Color(0xFF3B82F6)),
+              SizedBox(width: 8),
+              Text(
+                'SCOUTER COMMUNICATION VIEW',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w900,
+                  fontSize: 14,
+                  letterSpacing: 1.1,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          _infoRow(
+            'Readiness',
+            band,
+            valueColor: band.toLowerCase().contains('good')
+                ? const Color(0xFF32D583)
+                : (band.toLowerCase().contains('not') ? _kTextM : Colors.white),
+          ),
+          const SizedBox(height: 8),
+          _infoRow('Style', style),
+          const SizedBox(height: 8),
+          _infoRow('Captaincy', captaincy),
+          const SizedBox(height: 8),
+          _infoRow('Languages', languageText),
+          if (summary == null) ...[
+            const SizedBox(height: 10),
+            const Text(
+              'Player has not completed communication quiz yet.',
+              style: TextStyle(color: _kTextM, fontSize: 12.5, height: 1.35),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _infoRow(String label, String value, {Color? valueColor}) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.04),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.1)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 98,
+            child: Text(
+              label,
+              style: const TextStyle(
+                color: _kTextM,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 0.2,
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              value,
+              style: TextStyle(
+                color: valueColor ?? Colors.white,
+                fontWeight: FontWeight.w800,
+                fontSize: 14,
+                height: 1.25,
+              ),
+            ),
+          ),
         ],
       ),
     );
@@ -1333,18 +2987,55 @@ class _InfoRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
-      Icon(icon, size: 15, color: missing ? _kTextM : _kAccent),
-      const SizedBox(width: 6),
-      Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text(label, style: const TextStyle(color: _kTextM, fontSize: 10, fontWeight: FontWeight.w600, letterSpacing: 0.5)),
-        Text(value, style: TextStyle(
-          color: missing ? _kTextM : (valueColor ?? Colors.white),
-          fontSize: 13, fontWeight: FontWeight.w700,
-          fontStyle: missing ? FontStyle.italic : FontStyle.normal,
-        )),
-      ]),
-    ]);
+    final iconColor = missing ? _kTextM : _kAccent;
+    final dataColor = missing ? _kTextM : (valueColor ?? Colors.white);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.035),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: missing
+              ? _kTextM.withValues(alpha: 0.2)
+              : _kAccent.withValues(alpha: 0.28),
+        ),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          Icon(icon, size: 15, color: iconColor),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  label,
+                  style: const TextStyle(
+                    color: _kTextM,
+                    fontSize: 10,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 0.55,
+                  ),
+                ),
+                const SizedBox(height: 1),
+                Text(
+                  value,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: dataColor,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w800,
+                    fontStyle: missing ? FontStyle.italic : FontStyle.normal,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }
 
@@ -1353,9 +3044,14 @@ class _InfoRow extends StatelessWidget {
 // ══════════════════════════════════════════════════════════════════════════════
 
 class _ChallengesSheet extends StatefulWidget {
-  const _ChallengesSheet({required this.playerId, required this.playerName});
+  const _ChallengesSheet({
+    required this.playerId,
+    required this.playerName,
+    required this.onSendVideoRequest,
+  });
   final String playerId;
   final String playerName;
+  final VoidCallback onSendVideoRequest;
 
   @override
   State<_ChallengesSheet> createState() => _ChallengesSheetState();
@@ -1455,6 +3151,17 @@ class _ChallengesSheetState extends State<_ChallengesSheet> {
                 )),
               ]),
             ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+              child: SizedBox(
+                width: double.infinity,
+                child: _SheetActionButton(
+                  onTap: widget.onSendVideoRequest,
+                  icon: Icons.videocam_outlined,
+                  label: 'Send Video Request',
+                ),
+              ),
+            ),
             Divider(color: borderColor, height: 24),
             Expanded(
               child: _loading
@@ -1488,60 +3195,154 @@ class _ChallengesSheetState extends State<_ChallengesSheet> {
                                 final statusIcon = _statusIcon(status);
                                 final pct = target > 0 ? (progress / target).clamp(0.0, 1.0) : (status == 'completed' ? 1.0 : 0.0);
 
-                                return Container(
-                                  padding: const EdgeInsets.all(14),
-                                  decoration: BoxDecoration(
-                                    color: _kCard,
-                                    borderRadius: BorderRadius.circular(14),
-                                    border: Border.all(color: statusColor.withValues(alpha: 0.2)),
-                                  ),
-                                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                                    Row(children: [
-                                      Icon(statusIcon, size: 16, color: statusColor),
-                                      const SizedBox(width: 8),
-                                      Expanded(child: Text(title,
-                                        style: TextStyle(color: textColor, fontWeight: FontWeight.w800, fontSize: 14),
-                                        overflow: TextOverflow.ellipsis,
-                                      )),
-                                      Container(
-                                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                                        decoration: BoxDecoration(
-                                          color: statusColor.withValues(alpha: 0.15),
-                                          borderRadius: BorderRadius.circular(8),
-                                        ),
-                                        child: Text(
-                                          status.isEmpty ? 'pending' : status.replaceAll('_', ' ').toUpperCase(),
-                                          style: TextStyle(color: statusColor, fontSize: 9, fontWeight: FontWeight.w800, letterSpacing: 0.8),
-                                        ),
+                                return TweenAnimationBuilder<double>(
+                                  duration: Duration(milliseconds: 240 + (i * 45)),
+                                  curve: Curves.easeOutCubic,
+                                  tween: Tween(begin: 0, end: 1),
+                                  child: Container(
+                                    padding: const EdgeInsets.all(14),
+                                    decoration: BoxDecoration(
+                                      gradient: const LinearGradient(
+                                        begin: Alignment.topLeft,
+                                        end: Alignment.bottomRight,
+                                        colors: [
+                                          _kCard,
+                                          Color(0xFF101A2D),
+                                        ],
                                       ),
-                                    ]),
-                                    if (desc.isNotEmpty) ...[
-                                      const SizedBox(height: 6),
-                                      Text(desc, style: const TextStyle(color: _kTextM, fontSize: 12), maxLines: 2, overflow: TextOverflow.ellipsis),
-                                    ],
-                                    if (target > 0) ...[
-                                      const SizedBox(height: 10),
+                                      borderRadius: BorderRadius.circular(14),
+                                      border: Border.all(color: statusColor.withValues(alpha: 0.26)),
+                                    ),
+                                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                                       Row(children: [
-                                        Expanded(child: ClipRRect(
-                                          borderRadius: BorderRadius.circular(4),
-                                          child: LinearProgressIndicator(
-                                            value: pct,
-                                            minHeight: 6,
-                                            backgroundColor: Colors.white12,
-                                            valueColor: AlwaysStoppedAnimation<Color>(statusColor),
+                                        Icon(statusIcon, size: 16, color: statusColor),
+                                        const SizedBox(width: 8),
+                                        Expanded(child: Text(title,
+                                          style: TextStyle(
+                                            color: textColor,
+                                            fontWeight: FontWeight.w900,
+                                            fontSize: 14.5,
+                                            letterSpacing: 0.15,
                                           ),
+                                          overflow: TextOverflow.ellipsis,
                                         )),
-                                        const SizedBox(width: 10),
-                                        Text('${progress.toInt()} / ${target.toInt()}',
-                                          style: TextStyle(color: _kTextM, fontSize: 11, fontWeight: FontWeight.w700)),
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                          decoration: BoxDecoration(
+                                            color: statusColor.withValues(alpha: 0.16),
+                                            borderRadius: BorderRadius.circular(999),
+                                            border: Border.all(color: statusColor.withValues(alpha: 0.38)),
+                                          ),
+                                          child: Text(
+                                            status.isEmpty ? 'pending' : status.replaceAll('_', ' ').toUpperCase(),
+                                            style: TextStyle(color: statusColor, fontSize: 9.2, fontWeight: FontWeight.w800, letterSpacing: 0.85),
+                                          ),
+                                        ),
                                       ]),
-                                    ],
-                                  ]),
+                                      if (desc.isNotEmpty) ...[
+                                        const SizedBox(height: 6),
+                                        Text(
+                                          desc,
+                                          style: const TextStyle(color: _kTextM, fontSize: 12.4, height: 1.3),
+                                          maxLines: 2,
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                      ],
+                                      if (target > 0) ...[
+                                        const SizedBox(height: 10),
+                                        Row(children: [
+                                          Expanded(child: ClipRRect(
+                                            borderRadius: BorderRadius.circular(8),
+                                            child: LinearProgressIndicator(
+                                              value: pct,
+                                              minHeight: 7,
+                                              backgroundColor: Colors.white12,
+                                              valueColor: AlwaysStoppedAnimation<Color>(statusColor),
+                                            ),
+                                          )),
+                                          const SizedBox(width: 10),
+                                          Text('${progress.toInt()} / ${target.toInt()}',
+                                            style: TextStyle(color: _kTextM, fontSize: 11.5, fontWeight: FontWeight.w800)),
+                                        ]),
+                                      ],
+                                    ]),
+                                  ),
+                                  builder: (context, value, child) {
+                                    return Opacity(
+                                      opacity: value,
+                                      child: Transform.translate(
+                                        offset: Offset(0, 12 * (1 - value)),
+                                        child: child,
+                                      ),
+                                    );
+                                  },
                                 );
                               },
                             ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SheetActionButton extends StatelessWidget {
+  const _SheetActionButton({
+    required this.onTap,
+    required this.icon,
+    required this.label,
+  });
+
+  final VoidCallback onTap;
+  final IconData icon;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(14),
+        gradient: const LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            Color(0xFF4F46E5),
+            Color(0xFF2979FF),
+          ],
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xFF4F46E5).withValues(alpha: 0.35),
+            blurRadius: 16,
+            offset: const Offset(0, 8),
+          ),
+        ],
+      ),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(14),
+          onTap: onTap,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(icon, size: 18, color: Colors.white),
+                const SizedBox(width: 8),
+                Text(
+                  label,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w900,
+                    fontSize: 14,
+                    letterSpacing: 0.25,
+                  ),
+                ),
+              ],
+            ),
+          ),
         ),
       ),
     );

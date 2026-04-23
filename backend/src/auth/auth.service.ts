@@ -41,7 +41,7 @@ export class AuthService {
 
     const appBaseUrl = String(process.env.APP_BASE_URL || '').trim();
     const link = appBaseUrl
-      ? `${appBaseUrl.replace(/\/$/, '')}/#/forgot-password?email=${encodeURIComponent(input.to)}&token=${encodeURIComponent(input.token)}`
+      ? `${appBaseUrl.replace(/\/$/, '')}/reset-password?email=${encodeURIComponent(input.to)}&token=${encodeURIComponent(input.token)}`
       : '';
     if (!link) throw new BadRequestException('APP_BASE_URL not configured');
 
@@ -148,6 +148,37 @@ export class AuthService {
     return { email: created.email };
   }
 
+  async registerExpert(input: {
+    email: string;
+    password: string;
+    displayName?: string;
+    position?: string;
+    nation?: string;
+  }): Promise<{ email: string }> {
+    const created = await this.users.createUser({
+      email: input.email,
+      password: input.password,
+      role: 'expert',
+      displayName: input.displayName,
+      position: input.position,
+      nation: input.nation,
+    });
+    return { email: created.email };
+  }
+
+  async requestAdminAccess(input: {
+    email: string;
+    password: string;
+    displayName?: string;
+  }): Promise<{ email: string; status: 'pending' }> {
+    const created = await this.users.createAdminAccessRequest({
+      email: input.email,
+      password: input.password,
+      displayName: input.displayName,
+    });
+    return { email: created.email, status: 'pending' };
+  }
+
   async resendVerificationCode(email: string): Promise<{ ok: boolean }> {
     const e = (email || '').trim().toLowerCase();
     if (!e) throw new BadRequestException('email is required');
@@ -203,26 +234,28 @@ export class AuthService {
     const ok = await bcrypt.compare(password || '', user.passwordHash);
     if (!ok) throw new UnauthorizedException('Invalid credentials');
 
-    if (user.role !== 'admin') throw new ForbiddenException('Admin access required');
+    if (user.role !== 'admin' && user.role !== 'expert') {
+      throw new ForbiddenException('Admin or expert access required');
+    }
     if ((user as any).isBanned) throw new ForbiddenException('Account suspended');
 
     return this.issueToken(user._id.toString(), user.email, user.role);
   }
 
-  async loginWithGoogle(input: {
-    idToken?: string;
-    accessToken?: string;
-    role?: UserRole;
-    displayName?: string;
-  }): Promise<{ accessToken: string }> {
-    const idToken = (input.idToken || '').trim();
-    const accessToken = (input.accessToken || '').trim();
-    if (!idToken && !accessToken) throw new BadRequestException('idToken or accessToken is required');
-
-    const allowedAudiences = (process.env.GOOGLE_CLIENT_IDS || process.env.GOOGLE_CLIENT_ID || '')
+  private getAllowedGoogleAudiences(): string[] {
+    return (process.env.GOOGLE_CLIENT_IDS || process.env.GOOGLE_CLIENT_ID || '')
       .split(',')
       .map((s) => s.trim())
       .filter(Boolean);
+  }
+
+  private async resolveGoogleIdentity(input: {
+    idToken?: string;
+    accessToken?: string;
+  }): Promise<{ sub: string; email: string; name: string }> {
+    const idToken = (input.idToken || '').trim();
+    const accessToken = (input.accessToken || '').trim();
+    if (!idToken && !accessToken) throw new BadRequestException('idToken or accessToken is required');
 
     let sub = '';
     let email = '';
@@ -257,7 +290,7 @@ export class AuthService {
       sub = String(info?.user_id || info?.sub || '').trim();
       email = String(info?.email || '').trim().toLowerCase();
 
-      // tokeninfo doesn't always return email/name; fetch from userinfo as fallback.
+      // Access-token tokeninfo may omit email/name, so fallback to userinfo.
       if (!email || !sub) {
         try {
           const res = await axios.get('https://openidconnect.googleapis.com/v1/userinfo', {
@@ -269,23 +302,84 @@ export class AuthService {
           if (!email) email = String(ui?.email || '').trim().toLowerCase();
           name = String(ui?.name || '').trim();
         } catch {
-          // ignore; we'll validate required fields below
+          // Ignore fallback failures; required fields are validated below.
         }
       }
     }
 
     if (!sub) throw new UnauthorizedException('Invalid Google token');
     if (!email) throw new UnauthorizedException('Google account has no email');
+
+    const allowedAudiences = this.getAllowedGoogleAudiences();
     if (allowedAudiences.length > 0 && !allowedAudiences.includes(aud)) {
       throw new UnauthorizedException('Invalid Google token audience');
     }
 
+    return { sub, email, name };
+  }
+
+  async adminLoginWithGoogle(input: {
+    idToken?: string;
+    accessToken?: string;
+    displayName?: string;
+  }): Promise<{ accessToken: string }> {
+    const identity = await this.resolveGoogleIdentity(input);
+
+    const user = await this.users.findByEmail(identity.email);
+    if (!user) throw new UnauthorizedException('Account not found');
+
+    if (user.role !== 'admin' && user.role !== 'expert') {
+      throw new ForbiddenException('Admin or expert access required');
+    }
+    if ((user as any).isBanned) throw new ForbiddenException('Account suspended');
+
+    const linked = await this.users.findByGoogleSub(identity.sub);
+    if (linked && linked._id.toString() !== user._id.toString()) {
+      throw new ForbiddenException('Google account already linked to another user');
+    }
+
+    let shouldSave = false;
+    if (!user.googleSub || user.googleSub !== identity.sub) {
+      user.googleSub = identity.sub;
+      shouldSave = true;
+    }
+    if (!user.emailVerified) {
+      user.emailVerified = true;
+      shouldSave = true;
+    }
+
+    const nextDisplayName = (input.displayName || identity.name || '').trim();
+    if (!user.displayName && nextDisplayName) {
+      user.displayName = nextDisplayName;
+      shouldSave = true;
+    }
+
+    if (shouldSave) {
+      await user.save();
+    }
+
+    return this.issueToken(user._id.toString(), user.email, user.role);
+  }
+
+  async loginWithGoogle(input: {
+    idToken?: string;
+    accessToken?: string;
+    role?: UserRole;
+    displayName?: string;
+  }): Promise<{ accessToken: string }> {
+    const identity = await this.resolveGoogleIdentity(input);
+
     const createdOrUpdated = await this.users.createOrUpdateGoogleUser({
-      email,
-      googleSub: sub,
-      displayName: input.displayName || name,
+      email: identity.email,
+      googleSub: identity.sub,
+      displayName: input.displayName || identity.name,
       role: input.role,
     });
+
+    if (!createdOrUpdated.emailVerified) {
+      createdOrUpdated.emailVerified = true;
+      await createdOrUpdated.save();
+    }
 
     return this.issueToken(createdOrUpdated._id.toString(), createdOrUpdated.email, createdOrUpdated.role);
   }

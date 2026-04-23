@@ -1,18 +1,23 @@
 import { NavLink } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 
+type ViewerRole = 'admin' | 'expert';
+
 const NAV_ITEMS = [
-  { to: '/dashboard', label: 'Dashboard', icon: '⬛' },
-  { to: '/users', label: 'Users', icon: '👥' },
-  { to: '/players', label: 'Players', icon: '⚽' },
-  { to: '/scouters', label: 'Scouters', icon: '🔭' },
-  { to: '/videos', label: 'Videos', icon: '🎬' },
-  { to: '/reports', label: 'Reports', icon: '📋' },
-  { to: '/notifications', label: 'Notifications', icon: '🔔' },
-];
+  { to: '/dashboard', label: 'Dashboard', icon: '⬛', roles: ['admin'] },
+  { to: '/users', label: 'Users', icon: '👥', roles: ['admin'] },
+  { to: '/players', label: 'Players', icon: '⚽', roles: ['admin', 'expert'] },
+  { to: '/profile', label: 'Profile', icon: '💳', roles: ['admin', 'expert'] },
+  { to: '/billing-invoices', label: 'Billing and Invoices', icon: '🧾', roles: ['expert'] },
+  { to: '/scouters', label: 'Scouters', icon: '🔭', roles: ['admin'] },
+  { to: '/videos', label: 'Videos', icon: '🎬', roles: ['admin'] },
+  { to: '/reports', label: 'Reports', icon: '📋', roles: ['admin'] },
+  { to: '/notifications', label: 'Notifications', icon: '🔔', roles: ['admin'] },
+] as Array<{ to: string; label: string; icon: string; roles: ViewerRole[] }>;
 
 export function Sidebar() {
-  const { logout } = useAuth();
+  const { logout, role } = useAuth();
+  const visibleNavItems = NAV_ITEMS.filter((item) => item.roles.includes(role));
 
   return (
     <aside
@@ -49,14 +54,16 @@ export function Sidebar() {
           </div>
           <div>
             <div style={{ fontSize: 14, fontWeight: 900, color: 'var(--color-text)' }}>ScoutAI</div>
-            <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--color-accent)', letterSpacing: '1.5px', textTransform: 'uppercase' }}>Admin</div>
+            <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--color-accent)', letterSpacing: '1.5px', textTransform: 'uppercase' }}>
+              {role === 'expert' ? 'Expert' : 'Admin'}
+            </div>
           </div>
         </div>
       </div>
 
       {/* Nav */}
       <nav style={{ flex: 1, padding: '8px 12px' }}>
-        {NAV_ITEMS.map((item) => (
+        {visibleNavItems.map((item) => (
           <NavLink
             key={item.to}
             to={item.to}
@@ -82,7 +89,6 @@ export function Sidebar() {
         ))}
       </nav>
 
-      {/* Logout */}
       <div style={{ padding: '0 12px' }}>
         <button
           onClick={logout}

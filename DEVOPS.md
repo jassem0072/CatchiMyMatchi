@@ -26,8 +26,10 @@
 ### 3. CD Docker (`cd-docker.yml`) — runs on push to main (when backend/ai/admin change)
 - Build & push all Docker images to Docker Hub with `latest` + commit SHA tags
 
-### 4. Deploy VPS (`deploy-vps.yml`) — runs on push to main
-- SSH into your VPS → git pull → docker compose up --build
+### 4. Deploy VPS (`deploy-vps.yml`) — manual run (`workflow_dispatch`)
+- Trigger from GitHub Actions when you want to deploy
+- If VPS secrets are missing, deploy step is skipped safely
+- If secrets are set, it SSHes into your VPS → `git pull` → `docker compose up -d --build`
 
 ---
 
@@ -133,7 +135,7 @@
    | `VPS_PORT` | `22` (or custom port) |
    | `VPS_PROJECT_PATH` | `/opt/scoutai` |
 
-4. Every push to `main` now auto-deploys via SSH
+4. Deploy manually from **Actions → Deploy to VPS → Run workflow** (recommended until secrets are ready)
 
 ---
 

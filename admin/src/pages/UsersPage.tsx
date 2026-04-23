@@ -1,5 +1,6 @@
 import { useState, useCallback } from 'react';
-import { getUsers, deleteUser, banUser, unbanUser, promoteToAdmin } from '../api/users';
+import { getUsers, deleteUser, banUser, unbanUser, promoteToAdmin, approveAdminRequest } from '../api/users';
+import { notifyExpertInvoiceReady } from '../api/expert';
 import { useApi } from '../hooks/useApi';
 import { DataTable, type Column } from '../components/ui/DataTable';
 import { PillBadge } from '../components/ui/PillBadge';
@@ -9,6 +10,12 @@ import { Pagination } from '../components/ui/Pagination';
 import { ConfirmDialog } from '../components/ui/ConfirmDialog';
 import type { AdminUser } from '../types';
 
+const PROTECTED_ADMIN_EMAIL = 'testadmin@example.com';
+
+function isProtectedAdmin(user: AdminUser): boolean {
+  return user.email.trim().toLowerCase() === PROTECTED_ADMIN_EMAIL;
+}
+
 export function UsersPage() {
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState('');
@@ -16,6 +23,7 @@ export function UsersPage() {
 
   const [deleteTarget, setDeleteTarget] = useState<AdminUser | null>(null);
   const [actionLoading, setActionLoading] = useState(false);
+  const [notifyingId, setNotifyingId] = useState<string | null>(null);
 
   const fetcher = useCallback(
     () => getUsers({ page, limit: 20, search, role: roleFilter || undefined }),
@@ -25,6 +33,11 @@ export function UsersPage() {
   const { data, loading, refetch } = useApi(fetcher, [page, search, roleFilter]);
 
   async function handleDelete(user: AdminUser) {
+    if (isProtectedAdmin(user)) {
+      alert('This admin account is protected and cannot be deleted.');
+      return;
+    }
+
     setActionLoading(true);
     try {
       await deleteUser(user._id);
@@ -38,6 +51,11 @@ export function UsersPage() {
   }
 
   async function handleToggleBan(user: AdminUser) {
+    if (isProtectedAdmin(user)) {
+      alert('This admin account is protected and cannot be banned.');
+      return;
+    }
+
     try {
       if (user.isBanned) await unbanUser(user._id);
       else await banUser(user._id);
@@ -54,6 +72,29 @@ export function UsersPage() {
       refetch();
     } catch (e: unknown) {
       alert((e as any)?.response?.data?.message || 'Action failed');
+    }
+  }
+
+  async function handleApproveAdminRequest(user: AdminUser) {
+    if (!confirm(`Approve admin access request for "${user.email}"?`)) return;
+    try {
+      await approveAdminRequest(user._id);
+      refetch();
+    } catch (e: unknown) {
+      alert((e as any)?.response?.data?.message || 'Action failed');
+    }
+  }
+
+  async function handleNotifyInvoiceReady(user: AdminUser) {
+    setNotifyingId(user._id);
+    try {
+      const result = await notifyExpertInvoiceReady(user._id);
+      alert(`✅ Notification sent to ${user.displayName || user.email} for invoice ${result.invoiceId} (EUR ${result.amountEur.toFixed(2)}).`);
+    } catch (e: unknown) {
+      const msg = (e as any)?.response?.data?.message || 'Failed to notify expert';
+      alert(`❌ ${msg}`);
+    } finally {
+      setNotifyingId(null);
     }
   }
 
@@ -75,8 +116,12 @@ export function UsersPage() {
       header: 'Role',
       render: (row) => {
         const role = row.role as string;
+        const adminReq = row.adminAccessRequestStatus as string | undefined;
+        if (adminReq === 'pending') {
+          return <PillBadge variant="warning">admin-request-pending</PillBadge>;
+        }
         return (
-          <PillBadge variant={role === 'scouter' ? 'primary' : role === 'admin' ? 'accent' : 'success'}>
+          <PillBadge variant={role === 'scouter' ? 'primary' : role === 'admin' ? 'accent' : role === 'expert' ? 'warning' : 'success'}>
             {role}
           </PillBadge>
         );
@@ -105,11 +150,38 @@ export function UsersPage() {
     {
       key: '_actions',
       header: '',
-      width: 240,
+      width: 310,
       render: (row) => {
         const user = row as unknown as AdminUser;
+        const protectedAdmin = isProtectedAdmin(user);
+        const hasPendingAdminRequest = user.adminAccessRequestStatus === 'pending';
+        const isExpert = user.role === 'expert';
+        const isNotifying = notifyingId === user._id;
         return (
-          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+          <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end', flexWrap: 'wrap' }}>
+            {/* Expert-only: notify invoice ready */}
+            {isExpert && (
+              <Button
+                id={`notify-invoice-${user._id}`}
+                size="sm"
+                variant="primary"
+                onClick={() => void handleNotifyInvoiceReady(user)}
+                disabled={isNotifying}
+                style={{ fontSize: 11, background: 'linear-gradient(135deg,#1D63FF,#B7F408)', color: '#0a1018' }}
+              >
+                {isNotifying ? '…' : '🧾 Notify Invoice'}
+              </Button>
+            )}
+            {hasPendingAdminRequest && (
+              <Button
+                size="sm"
+                variant="primary"
+                onClick={() => handleApproveAdminRequest(user)}
+                style={{ fontSize: 11 }}
+              >
+                Approve Admin Request
+              </Button>
+            )}
             {user.role !== 'admin' && (
               <Button
                 size="sm"
@@ -120,22 +192,26 @@ export function UsersPage() {
                 Make Admin
               </Button>
             )}
-            <Button
-              size="sm"
-              variant={user.isBanned ? 'warning' : 'warning'}
-              onClick={() => handleToggleBan(user)}
-              style={{ fontSize: 11 }}
-            >
-              {user.isBanned ? 'Unban' : 'Ban'}
-            </Button>
-            <Button
-              size="sm"
-              variant="danger"
-              onClick={() => setDeleteTarget(user)}
-              style={{ fontSize: 11 }}
-            >
-              Delete
-            </Button>
+            {!protectedAdmin && (
+              <Button
+                size="sm"
+                variant={user.isBanned ? 'warning' : 'warning'}
+                onClick={() => handleToggleBan(user)}
+                style={{ fontSize: 11 }}
+              >
+                {user.isBanned ? 'Unban' : 'Ban'}
+              </Button>
+            )}
+            {!protectedAdmin && (
+              <Button
+                size="sm"
+                variant="danger"
+                onClick={() => setDeleteTarget(user)}
+                style={{ fontSize: 11 }}
+              >
+                Delete
+              </Button>
+            )}
           </div>
         );
       },
@@ -159,6 +235,7 @@ export function UsersPage() {
           <option value="">All roles</option>
           <option value="player">Player</option>
           <option value="scouter">Scouter</option>
+          <option value="expert">Expert</option>
           <option value="admin">Admin</option>
         </select>
       </div>

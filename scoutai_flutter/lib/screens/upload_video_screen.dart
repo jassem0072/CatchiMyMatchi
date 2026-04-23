@@ -4,11 +4,11 @@ import 'package:file_picker/file_picker.dart';
 import 'package:http/http.dart' as http;
 import 'package:http_parser/http_parser.dart';
 import 'dart:convert';
-import 'dart:typed_data';
 
 import '../app/scoutai_app.dart';
 import '../services/api_config.dart';
 import '../services/auth_storage.dart';
+import '../services/web_video_upload.dart';
 import '../theme/app_colors.dart';
 import '../services/translations.dart';
 import '../widgets/common.dart';
@@ -26,7 +26,7 @@ class _UploadVideoScreenState extends State<UploadVideoScreen> {
   String? _error;
   String? _info;
   PlatformFile? _picked;
-  Uint8List? _pickedBytes; // web
+  WebVideoHandle? _webPicked;
   Map<String, dynamic>? _uploaded;
 
   MediaType _videoMediaTypeForFilename(String filename) {
@@ -65,17 +65,28 @@ class _UploadVideoScreenState extends State<UploadVideoScreen> {
       _uploaded = null;
     });
 
-    final result = await FilePicker.platform.pickFiles(
-      type: FileType.video,
-      withData: kIsWeb,
-    );
-    if (!mounted) return;
-    if (result == null || result.files.isEmpty) return;
-    final file = result.files.first;
+    PlatformFile? file;
+    if (kIsWeb) {
+      final webFile = await pickWebVideo();
+      if (!mounted) return;
+      if (webFile == null) return;
+      _webPicked = webFile;
+      file = PlatformFile(name: webFile.name, size: webFile.size);
+    } else {
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.video,
+        withData: false,
+        withReadStream: true,
+      );
+      if (!mounted) return;
+      if (result == null || result.files.isEmpty) return;
+      file = result.files.first;
+    }
+
     if (!_isSupportedVideoFilename(file.name)) {
       setState(() {
         _picked = null;
-        _pickedBytes = null;
+        _webPicked = null;
         _error = S.current.unsupportedVideo;
       });
       return;
@@ -83,7 +94,6 @@ class _UploadVideoScreenState extends State<UploadVideoScreen> {
 
     setState(() {
       _picked = file;
-      _pickedBytes = file.bytes;
     });
   }
 
@@ -105,16 +115,41 @@ class _UploadVideoScreenState extends State<UploadVideoScreen> {
       req.headers['Authorization'] = 'Bearer $token';
 
       if (kIsWeb) {
-        final bytes = _pickedBytes;
-        if (bytes == null || bytes.isEmpty) throw Exception('Failed to read video');
-        req.files.add(
-          http.MultipartFile.fromBytes(
-            'file',
-            bytes,
-            filename: file.name,
-            contentType: _videoMediaTypeForFilename(file.name),
-          ),
+        final webFile = _webPicked;
+        if (webFile == null) {
+          throw Exception('No selected web video handle. Please reselect the file.');
+        }
+        final webRes = await uploadWebVideo(
+          url: uri.toString(),
+          token: token,
+          handle: webFile,
         );
+        if (!mounted) return;
+        if (webRes.statusCode >= 400) {
+          final body = webRes.body.trim();
+          setState(() {
+            _busy = false;
+            _error = body.isNotEmpty
+                ? 'Upload failed (${webRes.statusCode}): ${body.length > 200 ? body.substring(0, 200) : body}'
+                : 'Upload failed (${webRes.statusCode})';
+          });
+          return;
+        }
+
+        Map<String, dynamic> data;
+        try {
+          final parsed = jsonDecode(webRes.body);
+          data = parsed is Map<String, dynamic> ? parsed : <String, dynamic>{'data': parsed};
+        } catch (_) {
+          data = <String, dynamic>{'raw': webRes.body};
+        }
+
+        setState(() {
+          _busy = false;
+          _uploaded = data;
+          _info = S.current.encryptedTransfer;
+        });
+        return;
       } else {
         final p = file.path;
         if (p == null || p.isEmpty) {
@@ -129,14 +164,27 @@ class _UploadVideoScreenState extends State<UploadVideoScreen> {
             ),
           );
         } else {
-          req.files.add(
-            await http.MultipartFile.fromPath(
-              'file',
-              p,
-              filename: file.name,
-              contentType: _videoMediaTypeForFilename(file.name),
-            ),
-          );
+          final stream = file.readStream;
+          if (stream != null) {
+            req.files.add(
+              http.MultipartFile(
+                'file',
+                stream,
+                file.size,
+                filename: file.name,
+                contentType: _videoMediaTypeForFilename(file.name),
+              ),
+            );
+          } else {
+            req.files.add(
+              await http.MultipartFile.fromPath(
+                'file',
+                p,
+                filename: file.name,
+                contentType: _videoMediaTypeForFilename(file.name),
+              ),
+            );
+          }
         }
       }
 
@@ -181,6 +229,110 @@ class _UploadVideoScreenState extends State<UploadVideoScreen> {
     Navigator.of(context).pushNamed(AppRoutes.tagTeammates, arguments: id);
   }
 
+  String _fileSizeLabel(int bytes) {
+    final mb = bytes / (1024 * 1024);
+    if (mb >= 1024) return '${(mb / 1024).toStringAsFixed(2)} GB';
+    return '${mb.toStringAsFixed(1)} MB';
+  }
+
+  Widget _chipTag(
+    BuildContext context, {
+    required IconData icon,
+    required String label,
+    required Color tone,
+  }) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+      decoration: BoxDecoration(
+        color: tone.withValues(alpha: 0.14),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: tone.withValues(alpha: 0.4)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 14, color: tone),
+          const SizedBox(width: 6),
+          Text(
+            label,
+            style: TextStyle(
+              color: tone,
+              fontWeight: FontWeight.w800,
+              fontSize: 11,
+              letterSpacing: 0.5,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _flowStepChip(
+    BuildContext context, {
+    required String label,
+    required bool active,
+    required bool done,
+  }) {
+    final tone = done
+        ? AppColors.success
+        : active
+            ? AppColors.primary
+            : AppColors.txMuted(context);
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+      decoration: BoxDecoration(
+        color: done
+            ? AppColors.success.withValues(alpha: 0.16)
+            : active
+                ? AppColors.primary.withValues(alpha: 0.14)
+                : AppColors.surf2(context),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: tone.withValues(alpha: 0.4)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            done ? Icons.check_circle : Icons.radio_button_unchecked,
+            color: tone,
+            size: 14,
+          ),
+          const SizedBox(width: 7),
+          Text(
+            label,
+            style: TextStyle(
+              color: tone,
+              fontWeight: FontWeight.w800,
+              fontSize: 11,
+              letterSpacing: 0.45,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _statePill(BuildContext context, {required String label, required Color tone}) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: tone.withValues(alpha: 0.15),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: tone.withValues(alpha: 0.35)),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          color: tone,
+          fontWeight: FontWeight.w900,
+          fontSize: 10,
+          letterSpacing: 0.8,
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final s = S.of(context);
@@ -188,6 +340,22 @@ class _UploadVideoScreenState extends State<UploadVideoScreen> {
     final uploaded = _uploaded;
     final canUpload = !_busy;
     final canContinue = uploaded != null;
+    final hasPicked = picked != null;
+    final progressValue = uploaded != null
+        ? 1.0
+        : _busy
+            ? null
+            : 0.0;
+    final statusLabel = uploaded != null
+        ? s.uploadedSuccessfully
+        : _busy
+            ? s.uploadingVideo
+            : s.ready;
+    final statusTone = uploaded != null
+        ? AppColors.success
+        : _busy
+            ? AppColors.primary
+            : AppColors.txMuted(context);
 
     return GradientScaffold(
       appBar: AppBar(
@@ -201,65 +369,197 @@ class _UploadVideoScreenState extends State<UploadVideoScreen> {
         padding: const EdgeInsets.fromLTRB(18, 8, 18, 28),
         children: [
           const SizedBox(height: 10),
-          Text(
-            s.newMatchAnalysis,
-            style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 26),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            s.uploadInstructions,
-            style: TextStyle(color: AppColors.txMuted(context), fontWeight: FontWeight.w600),
-          ),
-          const SizedBox(height: 18),
           Container(
-            padding: const EdgeInsets.all(18),
+            padding: const EdgeInsets.all(20),
             decoration: BoxDecoration(
-              color: AppColors.surface.withValues(alpha: 0.8),
-              borderRadius: BorderRadius.circular(18),
-              border: Border.all(
-                color: AppColors.border.withValues(alpha: 0.9),
-                style: BorderStyle.solid,
+              borderRadius: BorderRadius.circular(24),
+              border: Border.all(color: AppColors.bdr(context).withValues(alpha: 0.9)),
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [
+                  AppColors.primary.withValues(alpha: 0.2),
+                  AppColors.surf(context).withValues(alpha: 0.95),
+                  AppColors.accent.withValues(alpha: 0.08),
+                ],
               ),
             ),
             child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Container(
-                  height: 64,
-                  width: 64,
-                  decoration: BoxDecoration(
-                    color: AppColors.surface2,
-                    borderRadius: BorderRadius.circular(999),
-                    border: Border.all(color: AppColors.border.withValues(alpha: 0.9)),
-                  ),
-                  child: const Icon(Icons.cloud_upload_outlined, color: AppColors.primary, size: 30),
+                Row(
+                  children: [
+                    Container(
+                      height: 52,
+                      width: 52,
+                      decoration: BoxDecoration(
+                        color: AppColors.primary.withValues(alpha: 0.18),
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(color: AppColors.primary.withValues(alpha: 0.45)),
+                      ),
+                      child: const Icon(Icons.auto_awesome, color: AppColors.primary, size: 24),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            s.newMatchAnalysis,
+                            style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 28, height: 1.05),
+                          ),
+                          const SizedBox(height: 5),
+                          Text(
+                            s.uploadInstructions,
+                            style: TextStyle(color: AppColors.txMuted(context), fontWeight: FontWeight.w600),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
                 ),
                 const SizedBox(height: 14),
-                Text(
-                  s.selectMatchVideo,
-                  style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 18),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  s.tapToUpload,
-                  textAlign: TextAlign.center,
-                  style: TextStyle(color: AppColors.txMuted(context), fontWeight: FontWeight.w600),
-                ),
-                const SizedBox(height: 14),
-                FilledButton(
-                  onPressed: canUpload ? _pickVideo : null,
-                  child: Text(s.browseFiles),
-                ),
-                const SizedBox(height: 10),
-                OutlinedButton(
-                  onPressed: (!canUpload || picked == null) ? null : _upload,
-                  child: _busy
-                      ? const SizedBox(height: 18, width: 18, child: CircularProgressIndicator(strokeWidth: 2))
-                      : Text(s.upload),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    _chipTag(context, icon: Icons.movie_creation_outlined, label: 'MP4', tone: AppColors.primary),
+                    _chipTag(context, icon: Icons.movie_filter_outlined, label: 'MOV', tone: AppColors.primary),
+                    _chipTag(context, icon: Icons.video_collection_outlined, label: 'WEBM', tone: AppColors.primary),
+                    _chipTag(context, icon: Icons.sd_storage_outlined, label: 'MAX 2GB', tone: AppColors.accent),
+                  ],
                 ),
               ],
             ),
           ),
-          const SizedBox(height: 22),
+          const SizedBox(height: 14),
+          GlassCard(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Container(
+                      height: 42,
+                      width: 42,
+                      decoration: BoxDecoration(
+                        color: AppColors.surf2(context),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: AppColors.bdr(context).withValues(alpha: 0.9)),
+                      ),
+                      child: const Icon(Icons.cloud_upload_outlined, color: AppColors.primary, size: 22),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            s.selectMatchVideo,
+                            style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 17),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            s.tapToUpload,
+                            style: TextStyle(color: AppColors.txMuted(context), fontWeight: FontWeight.w600, fontSize: 12),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 14),
+                Wrap(
+                  spacing: 10,
+                  runSpacing: 10,
+                  children: [
+                    FilledButton.icon(
+                      onPressed: canUpload ? _pickVideo : null,
+                      icon: const Icon(Icons.folder_open_outlined, size: 18),
+                      label: Text(s.browseFiles),
+                    ),
+                    OutlinedButton.icon(
+                      onPressed: (!canUpload || picked == null) ? null : _upload,
+                      icon: _busy
+                          ? const SizedBox(
+                              height: 16,
+                              width: 16,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.upload_rounded, size: 18),
+                      label: Text(_busy ? s.uploadingVideo : s.upload),
+                    ),
+                  ],
+                ),
+                if (hasPicked) ...[
+                  const SizedBox(height: 12),
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                    decoration: BoxDecoration(
+                      color: AppColors.surf2(context),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: AppColors.bdr(context).withValues(alpha: 0.9)),
+                    ),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.play_circle_outline, color: AppColors.primary, size: 18),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            picked.name,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: AppColors.tx(context),
+                              fontWeight: FontWeight.w800,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Text(
+                          _fileSizeLabel(picked.size),
+                          style: TextStyle(
+                            color: AppColors.txMuted(context),
+                            fontWeight: FontWeight.w700,
+                            fontSize: 11,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          const SizedBox(height: 14),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              _flowStepChip(
+                context,
+                label: 'PICK VIDEO',
+                active: true,
+                done: hasPicked || _busy || uploaded != null,
+              ),
+              _flowStepChip(
+                context,
+                label: 'UPLOAD',
+                active: _busy,
+                done: uploaded != null,
+              ),
+              _flowStepChip(
+                context,
+                label: 'ANALYZE',
+                active: uploaded != null,
+                done: false,
+              ),
+            ],
+          ),
+          const SizedBox(height: 18),
           Text(
             s.currentUpload,
             style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 18),
@@ -294,22 +594,21 @@ class _UploadVideoScreenState extends State<UploadVideoScreen> {
                           Text(
                             picked == null
                                 ? s.chooseVideo
-                                : '${((picked.size) / (1024 * 1024)).toStringAsFixed(1)} MB',
+                                : _fileSizeLabel(picked.size),
                             style: const TextStyle(color: AppColors.textMuted),
                           ),
                         ],
                       ),
                     ),
-                    if (_busy)
-                      const Text(
-                        '...',
-                        style: TextStyle(color: AppColors.primary, fontWeight: FontWeight.w900),
-                      )
-                    else if (uploaded != null)
-                      const Text(
-                        '100%',
-                        style: TextStyle(color: AppColors.primary, fontWeight: FontWeight.w900),
-                      ),
+                    _statePill(
+                      context,
+                      label: uploaded != null
+                          ? 'READY'
+                          : _busy
+                              ? 'UPLOADING'
+                              : 'IDLE',
+                      tone: statusTone,
+                    ),
                   ],
                 ),
                 const SizedBox(height: 14),
@@ -317,11 +616,7 @@ class _UploadVideoScreenState extends State<UploadVideoScreen> {
                   borderRadius: BorderRadius.circular(999),
                   child: LinearProgressIndicator(
                     minHeight: 8,
-                    value: uploaded != null
-                        ? 1.0
-                        : _busy
-                            ? null
-                            : 0.0,
+                    value: progressValue,
                     backgroundColor: AppColors.border,
                     color: AppColors.primary,
                   ),
@@ -331,16 +626,12 @@ class _UploadVideoScreenState extends State<UploadVideoScreen> {
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
                     Text(
-                      uploaded != null
-                          ? s.uploadedSuccessfully
-                          : _busy
-                              ? s.uploadingVideo
-                              : s.ready,
+                      statusLabel,
                       style: const TextStyle(color: AppColors.textMuted),
                     ),
                     Text(
                       uploaded != null
-                          ? 'done'
+                          ? '100%'
                           : _busy
                               ? '...'
                               : '',
@@ -368,15 +659,26 @@ class _UploadVideoScreenState extends State<UploadVideoScreen> {
             ),
           ),
           const SizedBox(height: 18),
-          FilledButton(
-            onPressed: canContinue ? _continue : null,
-            child: Text(s.continueToAnalysis),
-          ),
-          const SizedBox(height: 12),
-          Text(
-            s.buttonActivateWhenDone,
-            textAlign: TextAlign.center,
-            style: TextStyle(color: AppColors.txMuted(context)),
+          GlassCard(
+            padding: const EdgeInsets.all(12),
+            child: Column(
+              children: [
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton.icon(
+                    onPressed: canContinue ? _continue : null,
+                    icon: const Icon(Icons.analytics_outlined, size: 18),
+                    label: Text(s.continueToAnalysis),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Text(
+                  s.buttonActivateWhenDone,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: AppColors.txMuted(context)),
+                ),
+              ],
+            ),
           ),
         ],
       ),

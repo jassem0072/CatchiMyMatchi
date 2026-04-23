@@ -34,6 +34,7 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { TeamsService } from '../teams/teams.service';
 import { UsersService } from '../users/users.service';
 import { VideosService } from '../videos/videos.service';
+import { AdminService } from '../admin/admin.service';
 
 import Stripe from 'stripe';
 
@@ -62,6 +63,26 @@ function normalizePortraitContentType(file: Express.Multer.File): string {
   return 'image/jpeg';
 }
 
+function normalizePlayerDocumentContentType(file: Express.Multer.File): string {
+  const ct = (file.mimetype || '').toLowerCase();
+  if (ct.startsWith('image/')) return ct;
+  if (ct === 'application/pdf') return 'application/pdf';
+  if (ct === 'application/msword') return 'application/msword';
+  if (ct === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+    return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+  }
+
+  const ext = path.extname(file.originalname || '').toLowerCase();
+  if (ext === '.pdf') return 'application/pdf';
+  if (ext === '.doc') return 'application/msword';
+  if (ext === '.docx') return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+  if (ext === '.png') return 'image/png';
+  if (ext === '.webp') return 'image/webp';
+  if (ext === '.gif') return 'image/gif';
+  if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg';
+  throw new BadRequestException('Unsupported file type. Allowed: image, pdf, doc, docx');
+}
+
 function uploadsRoot(): string {
   const uploadDir = process.env.UPLOAD_DIR || 'uploads';
   return path.isAbsolute(uploadDir) ? uploadDir : path.join(process.cwd(), uploadDir);
@@ -80,6 +101,7 @@ export class MeController {
     private readonly challengesSvc: ChallengesService,
     private readonly notifSvc: NotificationsService,
     private readonly teamsSvc: TeamsService,
+    private readonly adminSvc: AdminService,
   ) {}
 
   /** GET /me — return authenticated user profile */
@@ -95,7 +117,7 @@ export class MeController {
   @Patch()
   async updateProfile(
     @Req() req: { user?: RequestUser },
-    @Body() body: { displayName?: string; position?: string; nation?: string; dateOfBirth?: string; height?: number },
+    @Body() body: { displayName?: string; position?: string; nation?: string; dateOfBirth?: string; height?: number; playerIdNumber?: string },
   ) {
     const me = req.user!;
     return this.users.updateProfile(me.sub, {
@@ -104,6 +126,68 @@ export class MeController {
       nation: body.nation,
       dateOfBirth: body.dateOfBirth,
       height: body.height,
+      playerIdNumber: body.playerIdNumber,
+    });
+  }
+
+  /** GET /me/player-workflow — returns the player's pre-contract workflow status */
+  @Get('player-workflow')
+  @Roles('player')
+  async getPlayerWorkflow(@Req() req: { user?: RequestUser }) {
+    const me = req.user!;
+    return this.adminSvc.getPlayerWorkflowForPlayer(me.sub);
+  }
+
+  /** POST /me/player-workflow/sign-pre-contract — player signs approved pre-contract online */
+  @Post('player-workflow/sign-pre-contract')
+  @Roles('player')
+  async signPreContract(
+    @Req() req: { user?: RequestUser },
+    @Body()
+    body: {
+      signatureImageBase64?: string;
+      signatureImageContentType?: string;
+      signatureImageFileName?: string;
+    },
+  ) {
+    const me = req.user!;
+    return this.adminSvc.signPlayerPreContract(me.sub, body);
+  }
+
+  /** POST /me/player-workflow/complete-online-session — marks online player session as completed */
+  @Post('player-workflow/complete-online-session')
+  @Roles('player')
+  async completeOnlineSession(@Req() req: { user?: RequestUser }) {
+    const me = req.user!;
+    return this.adminSvc.completePlayerOnlineSession(me.sub);
+  }
+
+  /** POST /me/communication-quiz — persist latest communication quiz summary */
+  @Post('communication-quiz')
+  async saveCommunicationQuiz(
+    @Req() req: { user?: RequestUser },
+    @Body()
+    body: {
+      language?: string;
+      score?: number;
+      totalQuestions?: number;
+      readinessBand?: string;
+      communicationStyle?: string;
+      captaincySummary?: string;
+    },
+  ) {
+    const me = req.user!;
+    if (!body.language || body.score === undefined || body.totalQuestions === undefined || !body.readinessBand) {
+      throw new BadRequestException('language, score, totalQuestions and readinessBand are required');
+    }
+
+    return this.users.updateCommunicationQuiz(me.sub, {
+      language: body.language,
+      score: body.score,
+      totalQuestions: body.totalQuestions,
+      readinessBand: body.readinessBand,
+      communicationStyle: body.communicationStyle,
+      captaincySummary: body.captaincySummary,
     });
   }
 
@@ -171,6 +255,20 @@ export class MeController {
       cancel_url: `${appBaseUrl}/#/profile?upgrade=cancelled`,
     });
 
+    await this.adminSvc.recordBillingTransaction({
+      userId: me.sub,
+      direction: 'payment',
+      type: 'subscription_payment',
+      amountEur: tierInfo.cents / 100,
+      status: 'requested',
+      reference: session.id,
+      provider: 'stripe_checkout',
+      metadata: {
+        tier: tierKey,
+        checkoutSessionId: session.id,
+      },
+    });
+
     return {
       checkoutUrl: session.url,
       sessionId: session.id,
@@ -179,97 +277,12 @@ export class MeController {
 
   @Post('pay-and-upgrade')
   async payAndUpgrade(
-    @Req() req: { user?: RequestUser },
-    @Body() body: { cardNumber?: string; expMonth?: number; expYear?: number; cvc?: string; tier?: string },
+    @Req() _req: { user?: RequestUser },
+    @Body() _body: Record<string, unknown>,
   ) {
-    const me = req.user!;
-    const user = await this.users.getById(me.sub);
-
-    if (!body.cardNumber || !body.expMonth || !body.expYear || !body.cvc) {
-      throw new BadRequestException('Card details are required');
-    }
-
-    const tierKey = body.tier || 'basic';
-    const tierInfo = TIER_PRICES[tierKey];
-    if (!tierInfo) throw new BadRequestException('Invalid tier. Choose basic, premium, or elite.');
-
-    let paymentId = `dev_${Date.now()}`;
-
-    // If Stripe is configured, process real payment
-    const stripeKey = process.env.STRIPE_SECRET_KEY || '';
-    if (stripeKey) {
-      const stripe = getStripe();
-      const cardNum = body.cardNumber.replace(/\s/g, '');
-
-      // Map well-known test card numbers to Stripe test tokens
-      // (raw card data APIs require special PCI certification)
-      const testCardTokens: Record<string, string> = {
-        '4242424242424242': 'tok_visa',
-        '4000056655665556': 'tok_visa_debit',
-        '5555555555554444': 'tok_mastercard',
-        '5200828282828210': 'tok_mastercard_debit',
-        '378282246310005':  'tok_amex',
-        '6011111111111117': 'tok_discover',
-        '3056930009020004': 'tok_diners',
-        '3566002020360505': 'tok_jcb',
-        '6200000000000005': 'tok_unionpay',
-      };
-
-      let paymentMethodId: string;
-      const testToken = testCardTokens[cardNum];
-
-      if (testToken) {
-        // Use Stripe's pre-built test token
-        const pm = await stripe.paymentMethods.create({
-          type: 'card',
-          card: { token: testToken },
-        } as any);
-        paymentMethodId = pm.id;
-      } else {
-        // For real / non-test card numbers, try the Tokens API
-        try {
-          const token = await stripe.tokens.create({
-            card: {
-              number: cardNum,
-              exp_month: String(body.expMonth),
-              exp_year: String(body.expYear),
-              cvc: body.cvc,
-            },
-          } as any);
-          const pm = await stripe.paymentMethods.create({
-            type: 'card',
-            card: { token: token.id },
-          });
-          paymentMethodId = pm.id;
-        } catch (err: any) {
-          throw new BadRequestException(
-            err?.message || 'Card processing failed. Use a Stripe test card (e.g. 4242 4242 4242 4242).',
-          );
-        }
-      }
-
-      const paymentIntent = await stripe.paymentIntents.create({
-        amount: tierInfo.cents,
-        currency: 'eur',
-        payment_method: paymentMethodId,
-        confirm: true,
-        automatic_payment_methods: { enabled: true, allow_redirects: 'never' },
-        metadata: { userId: me.sub, purpose: 'scouter_upgrade', tier: tierKey },
-      });
-
-      if (paymentIntent.status !== 'succeeded') {
-        throw new BadRequestException('Payment failed. Please check your card details.');
-      }
-      paymentId = paymentIntent.id;
-    }
-
-    // Delete user's videos only when transitioning from player to scouter
-    const deletedVideos = user.role === 'player' ? await this.videos.deleteByOwner(me.sub) : [];
-
-    // Upgrade user
-    const updated = await this.users.upgradeToScouter(me.sub, paymentId, tierInfo.tier);
-    const token = this.auth.issueTokenPublic(updated._id.toString(), updated.email, updated.role);
-    return { status: 'upgraded', deletedVideos, ...token };
+    throw new BadRequestException(
+      'Manual card entry is disabled for PCI-DSS compliance. Use /me/checkout and then /me/upgrade-status.',
+    );
   }
 
   @Get('upgrade-status')
@@ -303,6 +316,26 @@ export class MeController {
     const deletedVideos = currentUser.role === 'player' ? await this.videos.deleteByOwner(me.sub) : [];
 
     const updated = await this.users.upgradeToScouter(me.sub, paymentIntentId, tier);
+
+    const amountEur = Number(session.amount_total || 0) > 0
+      ? Number(session.amount_total || 0) / 100
+      : (TIER_PRICES[tier]?.cents || 0) / 100;
+
+    await this.adminSvc.recordBillingTransaction({
+      userId: me.sub,
+      direction: 'payment',
+      type: 'subscription_payment',
+      amountEur,
+      status: 'succeeded',
+      reference: paymentIntentId,
+      provider: 'stripe_checkout',
+      metadata: {
+        sessionId,
+        tier,
+        paymentStatus: session.payment_status,
+      },
+    });
+
     const token = this.auth.issueTokenPublic(updated._id.toString(), updated.email, updated.role);
     return { status: 'upgraded', deletedVideos, ...token };
   }
@@ -360,6 +393,20 @@ export class MeController {
       return { ...v, lastAnalysis: myAnalysis, isTagged: true, uploaderName };
     }
     return { ...v, isTagged: false };
+  }
+
+  /** DELETE /me/videos/:id — owner deletes full video, tagged player deletes own analysis */
+  @Delete('videos/:id')
+  async deleteMyVideo(
+    @Req() req: { user?: RequestUser },
+    @Param('id') videoId: string,
+  ) {
+    const me = req.user!;
+    const result = await this.videos.deleteForUser(videoId, me.sub);
+    return {
+      ok: true,
+      ...result,
+    };
   }
 
   @Post('videos')
@@ -574,6 +621,135 @@ export class MeController {
             : 0;
     console.log('[me/portrait] get', { userId: me.sub, contentType: portrait.contentType, bytes });
     res.setHeader('Content-Type', portrait.contentType || 'image/jpeg');
+    res.setHeader('Cache-Control', 'no-store');
+    return res.send(Buffer.isBuffer(data) ? data : Buffer.from(data));
+  }
+
+  @Post('player-documents/medical-diploma')
+  @Roles('player')
+  @ApiConsumes('multipart/form-data')
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        file: { type: 'string', format: 'binary' },
+      },
+      required: ['file'],
+    },
+  })
+  @UseInterceptors(
+    FileInterceptor('file', {
+      storage: memoryStorage(),
+      limits: {
+        fileSize: 10 * 1024 * 1024,
+      },
+    }),
+  )
+  async uploadMedicalDiploma(@Req() req: { user?: RequestUser }, @UploadedFile() file: Express.Multer.File) {
+    if (!file) throw new BadRequestException('file is required');
+    const me = req.user!;
+    if (!file.buffer || file.buffer.length === 0) throw new BadRequestException('file is required');
+    const contentType = normalizePlayerDocumentContentType(file);
+    const updated = await this.users.setMedicalDiplomaData(me.sub, file.buffer, contentType, file.originalname || 'medical-diploma');
+    const { passwordHash, ...safe } = updated as any;
+    return safe;
+  }
+
+  @Get('player-documents/medical-diploma')
+  @Roles('player')
+  async getMedicalDiploma(@Req() req: { user?: RequestUser }, @Res() res: Response) {
+    const me = req.user!;
+    const doc = await this.users.getMedicalDiplomaForUser(me.sub);
+    if (!doc) return res.status(204).end();
+    const data: any = doc.data as any;
+    res.setHeader('Content-Type', doc.contentType || 'application/octet-stream');
+    res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(doc.fileName || 'medical-diploma')}"`);
+    res.setHeader('Cache-Control', 'no-store');
+    return res.send(Buffer.isBuffer(data) ? data : Buffer.from(data));
+  }
+
+  @Post('player-documents/bulletin-n3')
+  @Roles('player')
+  @ApiConsumes('multipart/form-data')
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        file: { type: 'string', format: 'binary' },
+      },
+      required: ['file'],
+    },
+  })
+  @UseInterceptors(
+    FileInterceptor('file', {
+      storage: memoryStorage(),
+      limits: {
+        fileSize: 10 * 1024 * 1024,
+      },
+    }),
+  )
+  async uploadBulletinN3(@Req() req: { user?: RequestUser }, @UploadedFile() file: Express.Multer.File) {
+    if (!file) throw new BadRequestException('file is required');
+    const me = req.user!;
+    if (!file.buffer || file.buffer.length === 0) throw new BadRequestException('file is required');
+    const contentType = normalizePlayerDocumentContentType(file);
+    const updated = await this.users.setBulletinN3Data(me.sub, file.buffer, contentType, file.originalname || 'bulletin-n3');
+    const { passwordHash, ...safe } = updated as any;
+    return safe;
+  }
+
+  @Get('player-documents/bulletin-n3')
+  @Roles('player')
+  async getBulletinN3(@Req() req: { user?: RequestUser }, @Res() res: Response) {
+    const me = req.user!;
+    const doc = await this.users.getBulletinN3ForUser(me.sub);
+    if (!doc) return res.status(204).end();
+    const data: any = doc.data as any;
+    res.setHeader('Content-Type', doc.contentType || 'application/octet-stream');
+    res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(doc.fileName || 'bulletin-n3')}"`);
+    res.setHeader('Cache-Control', 'no-store');
+    return res.send(Buffer.isBuffer(data) ? data : Buffer.from(data));
+  }
+
+  @Post('player-documents/player-id')
+  @Roles('player')
+  @ApiConsumes('multipart/form-data')
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        file: { type: 'string', format: 'binary' },
+      },
+      required: ['file'],
+    },
+  })
+  @UseInterceptors(
+    FileInterceptor('file', {
+      storage: memoryStorage(),
+      limits: {
+        fileSize: 10 * 1024 * 1024,
+      },
+    }),
+  )
+  async uploadPlayerIdDocument(@Req() req: { user?: RequestUser }, @UploadedFile() file: Express.Multer.File) {
+    if (!file) throw new BadRequestException('file is required');
+    const me = req.user!;
+    if (!file.buffer || file.buffer.length === 0) throw new BadRequestException('file is required');
+    const contentType = normalizePlayerDocumentContentType(file);
+    const updated = await this.users.setPlayerIdDocumentData(me.sub, file.buffer, contentType, file.originalname || 'player-id');
+    const { passwordHash, ...safe } = updated as any;
+    return safe;
+  }
+
+  @Get('player-documents/player-id')
+  @Roles('player')
+  async getPlayerIdDocument(@Req() req: { user?: RequestUser }, @Res() res: Response) {
+    const me = req.user!;
+    const doc = await this.users.getPlayerIdDocumentForUser(me.sub);
+    if (!doc) return res.status(204).end();
+    const data: any = doc.data as any;
+    res.setHeader('Content-Type', doc.contentType || 'application/octet-stream');
+    res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(doc.fileName || 'player-id')}"`);
     res.setHeader('Cache-Control', 'no-store');
     return res.send(Buffer.isBuffer(data) ? data : Buffer.from(data));
   }

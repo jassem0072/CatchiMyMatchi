@@ -17,6 +17,12 @@ export type CreateUserInput = {
   nation?: string;
 };
 
+export type CreateAdminAccessRequestInput = {
+  email: string;
+  password: string;
+  displayName?: string;
+};
+
 @Injectable()
 export class UsersService {
   constructor(@InjectModel(User.name) private readonly userModel: Model<UserDocument>) {}
@@ -116,6 +122,30 @@ export class UsersService {
       displayName: input.displayName || '',
       position: input.position || '',
       nation: input.nation || '',
+    });
+
+    return created;
+  }
+
+  async createAdminAccessRequest(input: CreateAdminAccessRequestInput): Promise<UserDocument> {
+    const email = (input.email || '').trim().toLowerCase();
+    if (!email) throw new BadRequestException('email is required');
+    if (!input.password || input.password.length < 6) throw new BadRequestException('password must be at least 6 chars');
+
+    const existing = await this.userModel.findOne({ email }).lean();
+    if (existing) throw new BadRequestException('email already in use');
+
+    const passwordHash = await bcrypt.hash(input.password, 10);
+    const created = await this.userModel.create({
+      email,
+      passwordHash,
+      role: 'player',
+      displayName: input.displayName || '',
+      position: '',
+      nation: '',
+      adminAccessRequestStatus: 'pending',
+      adminAccessRequestedAt: new Date(),
+      adminAccessApprovedAt: null,
     });
 
     return created;
@@ -291,6 +321,105 @@ export class UsersService {
     };
   }
 
+  async setMedicalDiplomaData(
+    id: string,
+    medicalDiplomaData: Buffer,
+    medicalDiplomaContentType: string,
+    medicalDiplomaFileName = '',
+  ): Promise<any> {
+    const u = await this.userModel
+      .findByIdAndUpdate(
+        id,
+        { medicalDiplomaData, medicalDiplomaContentType, medicalDiplomaFileName },
+        { new: true },
+      )
+      .select('-portraitData -badgeData -medicalDiplomaData -bulletinN3Data')
+      .lean();
+    if (!u) throw new NotFoundException('User not found');
+    return u;
+  }
+
+  async getMedicalDiplomaForUser(id: string): Promise<{ data: Buffer; contentType: string; fileName: string } | null> {
+    const u: any = await this.userModel
+      .findById(id)
+      .select('medicalDiplomaData medicalDiplomaContentType medicalDiplomaFileName')
+      .lean();
+    if (!u) throw new NotFoundException('User not found');
+    const data = this.coerceToBuffer(u.medicalDiplomaData);
+    if (!data || data.length === 0) return null;
+    return {
+      data,
+      contentType: (u.medicalDiplomaContentType as string) || 'image/jpeg',
+      fileName: (u.medicalDiplomaFileName as string) || 'medical-diploma',
+    };
+  }
+
+  async setBulletinN3Data(
+    id: string,
+    bulletinN3Data: Buffer,
+    bulletinN3ContentType: string,
+    bulletinN3FileName = '',
+  ): Promise<any> {
+    const u = await this.userModel
+      .findByIdAndUpdate(
+        id,
+        { bulletinN3Data, bulletinN3ContentType, bulletinN3FileName },
+        { new: true },
+      )
+      .select('-portraitData -badgeData -medicalDiplomaData -bulletinN3Data')
+      .lean();
+    if (!u) throw new NotFoundException('User not found');
+    return u;
+  }
+
+  async setPlayerIdDocumentData(
+    id: string,
+    playerIdDocumentData: Buffer,
+    playerIdDocumentContentType: string,
+    playerIdDocumentFileName = '',
+  ): Promise<any> {
+    const u = await this.userModel
+      .findByIdAndUpdate(
+        id,
+        { playerIdDocumentData, playerIdDocumentContentType, playerIdDocumentFileName },
+        { new: true },
+      )
+      .select('-portraitData -badgeData -medicalDiplomaData -bulletinN3Data -playerIdDocumentData')
+      .lean();
+    if (!u) throw new NotFoundException('User not found');
+    return u;
+  }
+
+  async getPlayerIdDocumentForUser(id: string): Promise<{ data: Buffer; contentType: string; fileName: string } | null> {
+    const u: any = await this.userModel
+      .findById(id)
+      .select('playerIdDocumentData playerIdDocumentContentType playerIdDocumentFileName')
+      .lean();
+    if (!u) throw new NotFoundException('User not found');
+    const data = this.coerceToBuffer(u.playerIdDocumentData);
+    if (!data || data.length === 0) return null;
+    return {
+      data,
+      contentType: (u.playerIdDocumentContentType as string) || 'application/octet-stream',
+      fileName: (u.playerIdDocumentFileName as string) || 'player-id',
+    };
+  }
+
+  async getBulletinN3ForUser(id: string): Promise<{ data: Buffer; contentType: string; fileName: string } | null> {
+    const u: any = await this.userModel
+      .findById(id)
+      .select('bulletinN3Data bulletinN3ContentType bulletinN3FileName')
+      .lean();
+    if (!u) throw new NotFoundException('User not found');
+    const data = this.coerceToBuffer(u.bulletinN3Data);
+    if (!data || data.length === 0) return null;
+    return {
+      data,
+      contentType: (u.bulletinN3ContentType as string) || 'image/jpeg',
+      fileName: (u.bulletinN3FileName as string) || 'bulletin-n3',
+    };
+  }
+
   async upgradeToScouter(userId: string, paymentIntentId: string, tier: 'basic' | 'premium' | 'elite' = 'basic'): Promise<UserDocument> {
     const user = await this.userModel.findById(userId);
     if (!user) throw new NotFoundException('User not found');
@@ -359,7 +488,7 @@ export class UsersService {
 
   async updateProfile(
     id: string,
-    data: { displayName?: string; position?: string; nation?: string; dateOfBirth?: string; height?: number },
+    data: { displayName?: string; position?: string; nation?: string; dateOfBirth?: string; height?: number; playerIdNumber?: string },
   ): Promise<any> {
     const update: Record<string, any> = {};
     if (data.displayName !== undefined) update.displayName = data.displayName.trim();
@@ -367,6 +496,54 @@ export class UsersService {
     if (data.nation !== undefined) update.nation = data.nation.trim();
     if (data.dateOfBirth !== undefined) update.dateOfBirth = data.dateOfBirth ? new Date(data.dateOfBirth) : null;
     if (data.height !== undefined) update.height = data.height ?? null;
+    if (data.playerIdNumber !== undefined) update.playerIdNumber = data.playerIdNumber.trim();
+
+    const u = await this.userModel
+      .findByIdAndUpdate(id, update, { new: true })
+      .select('-passwordHash -portraitData -resetPasswordTokenHash -resetPasswordExpiresAt')
+      .lean();
+    if (!u) throw new NotFoundException('User not found');
+    return u;
+  }
+
+  async updateCommunicationQuiz(
+    id: string,
+    data: {
+      language: string;
+      score: number;
+      totalQuestions: number;
+      readinessBand: string;
+      communicationStyle?: string;
+      captaincySummary?: string;
+    },
+  ): Promise<any> {
+    const safeTotal = Math.max(1, Number(data.totalQuestions || 0));
+    const safeScore = Math.max(0, Math.min(safeTotal, Number(data.score || 0)));
+    const scorePercent = Math.round((safeScore * 100) / safeTotal);
+    const derivedStyle = scorePercent >= 80
+      ? 'Vocal organizer'
+      : scorePercent >= 60
+        ? 'Balanced communicator'
+        : 'Developing communicator';
+    const derivedCaptaincy = scorePercent >= 80
+      ? 'High captaincy communication potential'
+      : scorePercent >= 60
+        ? 'Good leadership communication foundation'
+        : 'Needs mentoring to lead communication under pressure';
+
+    const update: Record<string, any> = {
+      communicationQuiz: {
+        language: (data.language || 'English').trim(),
+        score: safeScore,
+        totalQuestions: safeTotal,
+        scorePercent,
+        readinessBand: (data.readinessBand || 'Needs adaptation').trim(),
+        communicationStyle: (data.communicationStyle || derivedStyle).trim(),
+        captaincySummary: (data.captaincySummary || derivedCaptaincy).trim(),
+        languages: [(data.language || 'English').trim()],
+        completedAt: new Date(),
+      },
+    };
 
     const u = await this.userModel
       .findByIdAndUpdate(id, update, { new: true })

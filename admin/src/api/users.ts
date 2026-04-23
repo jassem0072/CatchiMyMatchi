@@ -36,3 +36,8 @@ export async function promoteToAdmin(id: string): Promise<AdminUser> {
   const res = await client.patch<AdminUser>(`/admin/users/${id}/role`, { role: 'admin' });
   return res.data;
 }
+
+export async function approveAdminRequest(id: string): Promise<AdminUser> {
+  const res = await client.patch<AdminUser>(`/admin/users/${id}/approve-admin-request`);
+  return res.data;
+}

@@ -17,6 +17,8 @@ class PlayerShell extends StatefulWidget {
 }
 
 class _PlayerShellState extends State<PlayerShell> {
+  static const _brandLogoPath = 'assets/branding/scoutai_logo.png';
+
   int _navIndex = 0;
 
   List<String> _labels(BuildContext ctx) {
@@ -72,7 +74,35 @@ class _PlayerShellState extends State<PlayerShell> {
         automaticallyImplyLeading: false,
         title: Row(
           children: [
-            const Icon(Icons.sports_soccer, color: AppColors.primary, size: 24),
+            Container(
+              width: 30,
+              height: 30,
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(
+                  color: AppColors.primary.withValues(alpha: 0.45),
+                ),
+                boxShadow: [
+                  BoxShadow(
+                    color: AppColors.primary.withValues(alpha: 0.25),
+                    blurRadius: 8,
+                    offset: const Offset(0, 2),
+                  ),
+                ],
+              ),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(9),
+                child: Image.asset(
+                  _brandLogoPath,
+                  fit: BoxFit.cover,
+                  errorBuilder: (context, error, stackTrace) => const Icon(
+                    Icons.sports_soccer,
+                    color: AppColors.primary,
+                    size: 22,
+                  ),
+                ),
+              ),
+            ),
             const SizedBox(width: 10),
             const Flexible(
               child: Text('ScoutAI', overflow: TextOverflow.ellipsis,
@@ -85,6 +115,11 @@ class _PlayerShellState extends State<PlayerShell> {
             onPressed: () => Navigator.of(context).pushNamed(AppRoutes.comparator),
             icon: const Icon(Icons.compare_arrows),
             tooltip: 'Comparator',
+          ),
+          IconButton(
+            onPressed: () => Navigator.of(context).pushNamed(AppRoutes.contractWorkflow),
+            icon: const Icon(Icons.description_outlined),
+            tooltip: 'Contract Workflow',
           ),
           IconButton(
             onPressed: () {

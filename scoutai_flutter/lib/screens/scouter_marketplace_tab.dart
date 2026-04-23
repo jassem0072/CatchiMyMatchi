@@ -11,6 +11,7 @@ import '../theme/app_colors.dart';
 import '../widgets/common.dart';
 import '../widgets/country_picker.dart';
 import '../widgets/fifa_card_stats.dart';
+import '../widgets/list_paginator.dart';
 import '../widgets/simple_player_card.dart';
 
 const _kPositions = [
@@ -38,10 +39,13 @@ class ScouterMarketplaceTab extends StatefulWidget {
 
 
 class _ScouterMarketplaceTabState extends State<ScouterMarketplaceTab> {
+  static const int _playersPerPage = 4;
+
   bool _loading = true;
   String? _error;
   List<Map<String, dynamic>> _players = [];
   String _search = '';
+  int _currentPage = 1;
 
   // ── Filter state ──
   int? _minAge;
@@ -109,7 +113,11 @@ class _ScouterMarketplaceTabState extends State<ScouterMarketplaceTab> {
 
       if (!mounted) return;
 
-      setState(() { _players = list; _loading = false; });
+      setState(() {
+        _players = list;
+        _currentPage = 1;
+        _loading = false;
+      });
 
     } catch (e) {
 
@@ -200,6 +208,7 @@ class _ScouterMarketplaceTabState extends State<ScouterMarketplaceTab> {
       _filterCountry = null; _filterPosition = null;
       _minOvr = null; _maxOvr = null;
       _minHeight = null; _maxHeight = null;
+      _currentPage = 1;
     });
     _minAgeCtrl.clear(); _maxAgeCtrl.clear();
     _minOvrCtrl.clear(); _maxOvrCtrl.clear();
@@ -236,6 +245,13 @@ class _ScouterMarketplaceTabState extends State<ScouterMarketplaceTab> {
     }).toList();
   }
 
+  List<Map<String, dynamic>> _pagePlayers(List<Map<String, dynamic>> players, int page) {
+    final start = (page - 1) * _playersPerPage;
+    if (start >= players.length) return const [];
+    final end = (start + _playersPerPage).clamp(0, players.length);
+    return players.sublist(start, end);
+  }
+
   void _openFilterSheet() {
     showModalBottomSheet(
       context: context,
@@ -261,6 +277,7 @@ class _ScouterMarketplaceTabState extends State<ScouterMarketplaceTab> {
             _filterCountry = country; _filterPosition = position;
             _minOvr = minOvr; _maxOvr = maxOvr;
             _minHeight = minHeight; _maxHeight = maxHeight;
+            _currentPage = 1;
           });
         },
         onClear: _clearFilters,
@@ -279,6 +296,9 @@ class _ScouterMarketplaceTabState extends State<ScouterMarketplaceTab> {
 
 
     final players = _filteredPlayers;
+  final totalPages = (players.length / _playersPerPage).ceil().clamp(1, 999999);
+  final activePage = _currentPage.clamp(1, totalPages);
+  final pagePlayers = _pagePlayers(players, activePage);
 
     return RefreshIndicator(
       onRefresh: _load,
@@ -300,7 +320,10 @@ class _ScouterMarketplaceTabState extends State<ScouterMarketplaceTab> {
             children: [
               Expanded(
                 child: TextField(
-                  onChanged: (v) => setState(() => _search = v),
+                  onChanged: (v) => setState(() {
+                    _search = v;
+                    _currentPage = 1;
+                  }),
                   decoration: InputDecoration(
                     hintText: S.of(context).searchByNamePositionNation,
                     prefixIcon: const Icon(Icons.search),
@@ -436,13 +459,15 @@ class _ScouterMarketplaceTabState extends State<ScouterMarketplaceTab> {
 
               ),
 
-              itemCount: players.length,
+              itemCount: pagePlayers.length,
 
               itemBuilder: (ctx, i) {
 
-                final player = players[i];
+                final player = pagePlayers[i];
 
                 return _MarketplaceCardTile(
+
+                  key: ValueKey((player['_id'] ?? player['id'])?.toString() ?? 'player-$i'),
 
                   player: player,
 
@@ -465,6 +490,15 @@ class _ScouterMarketplaceTabState extends State<ScouterMarketplaceTab> {
               },
 
             ),
+          if (players.length > _playersPerPage) ...[
+            const SizedBox(height: 14),
+            ListPaginator(
+              totalItems: players.length,
+              itemsPerPage: _playersPerPage,
+              currentPage: activePage,
+              onPageChanged: (page) => setState(() => _currentPage = page),
+            ),
+          ],
 
         ],
       ),
@@ -507,6 +541,8 @@ class _MarketplaceCardTile extends StatefulWidget {
 
   const _MarketplaceCardTile({
 
+    super.key,
+
     required this.player,
 
     required this.onFavoriteToggle,
@@ -539,6 +575,8 @@ class _MarketplaceCardTileState extends State<_MarketplaceCardTile> {
 
   FifaCardStats _stats = FifaCardStats.empty;
 
+  String _boundPlayerId = '';
+
 
 
   @override
@@ -551,6 +589,19 @@ class _MarketplaceCardTileState extends State<_MarketplaceCardTile> {
 
   }
 
+  @override
+  void didUpdateWidget(covariant _MarketplaceCardTile oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final oldId = (oldWidget.player['_id'] ?? oldWidget.player['id'])?.toString() ?? '';
+    final newId = (widget.player['_id'] ?? widget.player['id'])?.toString() ?? '';
+    if (oldId != newId) {
+      _portrait = null;
+      _stats = FifaCardStats.empty;
+      _boundPlayerId = '';
+      _loadData();
+    }
+  }
+
 
 
   Future<void> _loadData() async {
@@ -558,6 +609,8 @@ class _MarketplaceCardTileState extends State<_MarketplaceCardTile> {
     final id = (widget.player['_id'] ?? widget.player['id'])?.toString() ?? '';
 
     if (id.isEmpty) return;
+
+    _boundPlayerId = id;
 
     final token = await AuthStorage.loadToken();
 
@@ -589,7 +642,7 @@ class _MarketplaceCardTileState extends State<_MarketplaceCardTile> {
 
       final results = await Future.wait([portraitFuture, dashboardFuture]);
 
-      if (!mounted) return;
+      if (!mounted || _boundPlayerId != id) return;
 
 
 
@@ -688,8 +741,6 @@ class _MarketplaceCardTileState extends State<_MarketplaceCardTile> {
 
     final position = (widget.player['position'] ?? '').toString();
 
-    final nation = (widget.player['nation'] ?? '').toString();
-
     final isFav = widget.player['isFavorite'] == true;
 
 
@@ -707,6 +758,8 @@ class _MarketplaceCardTileState extends State<_MarketplaceCardTile> {
             position: position.isNotEmpty ? position : '?',
 
             portraitBytes: _portrait,
+
+            isVerified: widget.player['badgeVerified'] == true,
 
             onTap: widget.onTap,
 

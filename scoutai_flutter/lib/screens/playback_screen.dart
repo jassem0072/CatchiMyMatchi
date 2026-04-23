@@ -11,6 +11,7 @@ import '../services/api_config.dart';
 import '../services/auth_storage.dart';
 import '../theme/app_colors.dart';
 import '../widgets/common.dart';
+import '../widgets/tracking_overlay.dart';
 
 class PlaybackScreen extends StatefulWidget {
   const PlaybackScreen({super.key});
@@ -32,6 +33,13 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
   String _visibility = 'public';
   bool _togglingVisibility = false;
 
+  // ── Tracking overlay ───────────────────────────────────────────────────────
+  List<Map<String, dynamic>> _positions = [];
+  String _playerName = '';
+  double? _selectionT;
+  double? _selectionNcx;
+  double? _selectionNcy;
+
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
@@ -49,6 +57,7 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
       _analysis = args['lastAnalysis'] is Map<String, dynamic>
           ? args['lastAnalysis'] as Map<String, dynamic>
           : null;
+      _parsePositions(args);
     } else if (args is String) {
       _videoId = args;
     }
@@ -56,9 +65,144 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
     if (_videoId != null) {
       _initVideo();
       if (_videoData == null) _loadVideoDetails();
+      _fetchPositionsFromApi();
+      _fetchPlayerName();
     } else {
       setState(() => _error = 'No video ID provided.');
     }
+  }
+
+  double? _numOrNull(dynamic v) {
+    if (v is num) return v.toDouble();
+    if (v is String) return double.tryParse(v);
+    return null;
+  }
+
+  int? _trackIdOf(Map<String, dynamic> p) {
+    final v = p['trackId'] ?? p['track_id'];
+    if (v is int) return v;
+    if (v is num) return v.toInt();
+    if (v is String) return int.tryParse(v);
+    return null;
+  }
+
+  double _pointT(Map<String, dynamic> p) => (p['t'] as num?)?.toDouble() ?? 0.0;
+
+  double _pointNcx(Map<String, dynamic> p) {
+    final v = p['ncx'];
+    if (v is num) return v.toDouble();
+    final cx = p['cx'];
+    return cx is num ? cx.toDouble() / 1920.0 : 0.5;
+  }
+
+  double _pointNcy(Map<String, dynamic> p) {
+    final v = p['ncy'];
+    if (v is num) return v.toDouble();
+    final cy = p['cy'];
+    return cy is num ? cy.toDouble() / 1080.0 : 0.5;
+  }
+
+  List<Map<String, dynamic>> _lockToSingleTrack(
+    List<Map<String, dynamic>> points, {
+    double? selectionT,
+    double? selectionNcx,
+    double? selectionNcy,
+  }) {
+    if (points.length < 2) return points;
+
+    final withTrack = points.where((p) => _trackIdOf(p) != null).toList();
+    if (withTrack.isEmpty) return points;
+
+    int? lockedTrack;
+
+    if (selectionT != null) {
+      final near = withTrack
+          .where((p) => (_pointT(p) - selectionT).abs() <= 3.0)
+          .toList();
+      final pickFrom = near.isNotEmpty ? near : withTrack;
+
+      double bestScore = double.infinity;
+      for (final p in pickFrom) {
+        final dt = (_pointT(p) - selectionT).abs();
+        double score = dt;
+        if (selectionNcx != null && selectionNcy != null) {
+          final dx = _pointNcx(p) - selectionNcx;
+          final dy = _pointNcy(p) - selectionNcy;
+          score += 4.0 * (dx * dx + dy * dy);
+        }
+        if (score < bestScore) {
+          bestScore = score;
+          lockedTrack = _trackIdOf(p);
+        }
+      }
+    }
+
+    lockedTrack ??= () {
+      final counts = <int, int>{};
+      for (final p in withTrack) {
+        final tid = _trackIdOf(p);
+        if (tid != null) {
+          counts[tid] = (counts[tid] ?? 0) + 1;
+        }
+      }
+      int? bestTid;
+      int bestCount = -1;
+      counts.forEach((tid, c) {
+        if (c > bestCount) {
+          bestCount = c;
+          bestTid = tid;
+        }
+      });
+      return bestTid;
+    }();
+
+    if (lockedTrack == null) return points;
+
+    final filtered = points.where((p) => _trackIdOf(p) == lockedTrack).toList();
+    if (filtered.length < 2) return points;
+
+    filtered.sort((a, b) => _pointT(a).compareTo(_pointT(b)));
+
+    // Keep a continuous segment from the selection moment and stop when motion
+    // becomes physically implausible (identity switch / tracker drift).
+    final startIdx = selectionT == null
+        ? 0
+        : (() {
+            var bestIdx = 0;
+            var bestDt = double.infinity;
+            for (var i = 0; i < filtered.length; i++) {
+              final dt = (_pointT(filtered[i]) - selectionT).abs();
+              if (dt < bestDt) {
+                bestDt = dt;
+                bestIdx = i;
+              }
+            }
+            return bestIdx;
+          })();
+
+    const maxNormSpeed = 0.55; // normalized units per second
+    final continuous = <Map<String, dynamic>>[filtered[startIdx]];
+    for (var i = startIdx + 1; i < filtered.length; i++) {
+      final prev = continuous.last;
+      final cur = filtered[i];
+      final dt = (_pointT(cur) - _pointT(prev)).abs();
+      if (dt <= 1e-6) continue;
+      if (dt > 2.0) {
+        break;
+      }
+
+      final dx = _pointNcx(cur) - _pointNcx(prev);
+      final dy = _pointNcy(cur) - _pointNcy(prev);
+      final v = (dx * dx + dy * dy) / (dt * dt);
+
+      if (v > maxNormSpeed * maxNormSpeed) {
+        break;
+      }
+      continuous.add(cur);
+    }
+
+    if (continuous.length >= 2) return continuous;
+    return filtered;
   }
 
   Future<void> _initVideo() async {
@@ -97,6 +241,133 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
               ? data['lastAnalysis'] as Map<String, dynamic>
               : null;
         });
+        _parsePositions(data);
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _fetchPositionsFromApi() async {
+    if (_videoId == null) return;
+    try {
+      final token = await AuthStorage.loadToken();
+      if (token == null || !mounted) return;
+
+      final uri = Uri.parse('${ApiConfig.baseUrl}/videos/$_videoId/positions');
+      final res = await http.get(uri, headers: {'Authorization': 'Bearer $token'});
+      if (!mounted || res.statusCode >= 400) return;
+
+      final data = jsonDecode(res.body);
+      if (data is! Map<String, dynamic>) return;
+
+      final apiName = (data['playerName'] ?? '').toString();
+      final rawPos = data['positions'];
+      List<Map<String, dynamic>> parsed = _positions;
+      if (rawPos is List) {
+        parsed = rawPos
+            .whereType<Map>()
+            .map((p) => Map<String, dynamic>.from(p))
+            .toList()
+          ..sort((a, b) {
+            final ta = (a['t'] as num?)?.toDouble() ?? 0.0;
+            final tb = (b['t'] as num?)?.toDouble() ?? 0.0;
+            return ta.compareTo(tb);
+          });
+      }
+
+      final selT = _numOrNull(data['selectionT']);
+      final selNcx = _numOrNull(data['selectionNcx']);
+      final selNcy = _numOrNull(data['selectionNcy']);
+      parsed = _lockToSingleTrack(
+        parsed,
+        selectionT: selT,
+        selectionNcx: selNcx,
+        selectionNcy: selNcy,
+      );
+
+      if (!mounted) return;
+      setState(() {
+        _positions = parsed;
+        _selectionT = selT;
+        _selectionNcx = selNcx;
+        _selectionNcy = selNcy;
+        if (apiName.isNotEmpty) {
+          _playerName = apiName.toUpperCase();
+        }
+      });
+    } catch (_) {
+      // Keep existing fallback from route args.
+    }
+  }
+
+  void _parsePositions(Map<String, dynamic> data) {
+    // Extract positions from lastAnalysis
+    final la = data['lastAnalysis'];
+    List<dynamic>? rawPos;
+    if (la is Map<String, dynamic>) {
+      rawPos = la['positions'] as List<dynamic>?;
+    }
+    rawPos ??= data['positions'] as List<dynamic>?;
+
+    if (rawPos == null || rawPos.isEmpty) return;
+
+    final parsed = rawPos
+        .whereType<Map>()
+        .map((p) => Map<String, dynamic>.from(p))
+        .toList()
+      ..sort((a, b) {
+        final ta = (a['t'] as num?)?.toDouble() ?? 0.0;
+        final tb = (b['t'] as num?)?.toDouble() ?? 0.0;
+        return ta.compareTo(tb);
+      });
+
+    final selT = _numOrNull(data['selectionT']) ?? _selectionT;
+    final selNcx = _numOrNull(data['selectionNcx']) ?? _selectionNcx;
+    final selNcy = _numOrNull(data['selectionNcy']) ?? _selectionNcy;
+    final filtered = _lockToSingleTrack(
+      parsed,
+      selectionT: selT,
+      selectionNcx: selNcx,
+      selectionNcy: selNcy,
+    );
+
+    // Player name: try displayName, email prefix, uploader, or title
+    final me = data['owner'] ?? data['me'];
+    String name = '';
+    if (me is Map) {
+      name = (me['displayName'] ?? me['email'] ?? '').toString();
+    }
+    if (name.isEmpty) {
+      name = (data['displayName'] ?? data['uploaderName'] ?? '').toString();
+    }
+    if (name.isEmpty) name = _title;
+    final at = name.indexOf('@');
+    if (at > 0) name = name.substring(0, at);
+
+    if (mounted) {
+      setState(() {
+        _positions = filtered;
+        _playerName = name.toUpperCase();
+      });
+    }
+  }
+
+  Future<void> _fetchPlayerName() async {
+    if (_playerName.isNotEmpty && !_playerName.contains('.')) return;
+    try {
+      final token = await AuthStorage.loadToken();
+      if (token == null || !mounted) return;
+      final res = await http.get(
+        Uri.parse('${ApiConfig.baseUrl}/me'),
+        headers: {'Authorization': 'Bearer $token'},
+      );
+      if (res.statusCode < 400 && mounted) {
+        final data = jsonDecode(res.body) as Map<String, dynamic>;
+        final name = (data['displayName'] ?? data['email'] ?? '').toString();
+        final at = name.indexOf('@');
+        final display = at > 0 ? name.substring(0, at) : name;
+        if (display.isNotEmpty && mounted) {
+          setState(() => _playerName = display.toUpperCase());
+        }
       }
     } catch (_) {}
   }
@@ -104,72 +375,12 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
   Future<void> _startCast() async {
     if (_videoId == null) return;
     final streamUrl = '${ApiConfig.baseUrl}/videos/$_videoId/stream';
-    await Clipboard.setData(ClipboardData(text: streamUrl));
     if (!mounted) return;
-    // Show bottom sheet with cast options
     showModalBottomSheet<void>(
       context: context,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      builder: (_) => Padding(
-        padding: const EdgeInsets.fromLTRB(24, 20, 24, 32),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text('Cast to TV',
-                style: TextStyle(fontWeight: FontWeight.w900, fontSize: 18)),
-            const SizedBox(height: 8),
-            const Text(
-              'Open the video link on your TV or cast-capable app.',
-              style: TextStyle(color: AppColors.textMuted, fontSize: 13),
-            ),
-            const SizedBox(height: 16),
-            Text(streamUrl,
-                style: const TextStyle(
-                    color: AppColors.textMuted,
-                    fontSize: 11,
-                    fontFamily: 'monospace'),
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis),
-            const SizedBox(height: 16),
-            Row(
-              children: [
-                Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: () async {
-                      await Clipboard.setData(ClipboardData(text: streamUrl));
-                      if (mounted) Navigator.pop(context);
-                      if (mounted) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                            content: Text('Link copied to clipboard'),
-                            duration: Duration(seconds: 2),
-                          ),
-                        );
-                      }
-                    },
-                    icon: const Icon(Icons.copy, size: 18),
-                    label: const Text('Copy Link'),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: FilledButton.icon(
-                    onPressed: () async {
-                      Navigator.pop(context);
-                      await Share.share(streamUrl, subject: _title);
-                    },
-                    icon: const Icon(Icons.share, size: 18),
-                    label: const Text('Share'),
-                  ),
-                ),
-              ],
-            ),
-          ],
-        ),
-      ),
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (_) => _CastSheet(streamUrl: streamUrl, title: _title),
     );
   }
 
@@ -252,20 +463,6 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
               ),
             ),
           IconButton(
-            tooltip: 'Generate Highlight Reel',
-            onPressed: _videoId != null
-                ? () => Navigator.of(context).pushNamed(
-                      AppRoutes.montage,
-                      arguments: {
-                        'videoId': _videoId,
-                        'title': _title,
-                        if (_videoData?['ownerId'] != null) 'playerId': _videoData!['ownerId'],
-                      },
-                    )
-                : null,
-            icon: const Icon(Icons.movie_creation_outlined, size: 22),
-          ),
-          IconButton(
             tooltip: 'Cast to TV',
             onPressed: _videoId != null ? _startCast : null,
             icon: const Icon(Icons.cast, size: 22),
@@ -273,7 +470,7 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
           IconButton(
             tooltip: 'Share',
             onPressed: _videoId != null ? _shareVideoLink : null,
-            icon: const Icon(Icons.share_outlined),
+            icon: const Icon(Icons.share_outlined, size: 22),
           ),
           const SizedBox(width: 6),
         ],
@@ -315,6 +512,19 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
             alignment: Alignment.center,
             children: [
               VideoPlayer(c),
+
+              // ── Tracking overlay: full-match follow on tracked timeline ──
+              if (_positions.isNotEmpty || _selectionT != null)
+                TrackingOverlay(
+                  controller: c,
+                  positions: _positions,
+                  playerName: _playerName,
+                  selectionT: _selectionT,
+                  selectionNcx: _selectionNcx,
+                  selectionNcy: _selectionNcy,
+                  fullMatch: true,
+                ),
+
               // Play/Pause overlay
               ValueListenableBuilder<VideoPlayerValue>(
                 valueListenable: c,
@@ -601,6 +811,90 @@ class _MetricCard extends StatelessWidget {
             fontWeight: FontWeight.w900, fontSize: 18,
             color: accent ?? AppColors.tx(context),
           )),
+        ],
+      ),
+    );
+  }
+}
+
+class _CastSheet extends StatelessWidget {
+  const _CastSheet({required this.streamUrl, required this.title});
+  final String streamUrl;
+  final String title;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: AppColors.border),
+      ),
+      padding: const EdgeInsets.fromLTRB(24, 16, 24, 24),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Center(
+            child: Container(width: 36, height: 4,
+              decoration: BoxDecoration(color: AppColors.border, borderRadius: BorderRadius.circular(2))),
+          ),
+          const SizedBox(height: 16),
+          Row(children: [
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(color: AppColors.primary.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(12)),
+              child: const Icon(Icons.cast, color: AppColors.primary, size: 22),
+            ),
+            const SizedBox(width: 12),
+            const Expanded(child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Cast to TV', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 16)),
+                Text('Same WiFi or Bluetooth', style: TextStyle(color: AppColors.textMuted, fontSize: 12)),
+              ],
+            )),
+          ]),
+          const SizedBox(height: 16),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            decoration: BoxDecoration(color: AppColors.surface2, borderRadius: BorderRadius.circular(10), border: Border.all(color: AppColors.border)),
+            child: Row(children: [
+              const Icon(Icons.link, color: AppColors.textMuted, size: 16),
+              const SizedBox(width: 8),
+              Expanded(child: Text(streamUrl, style: const TextStyle(color: AppColors.textMuted, fontSize: 11, fontFamily: 'monospace'), maxLines: 1, overflow: TextOverflow.ellipsis)),
+            ]),
+          ),
+          const SizedBox(height: 16),
+          Row(children: [
+            Expanded(child: OutlinedButton.icon(
+              onPressed: () async {
+                await Clipboard.setData(ClipboardData(text: streamUrl));
+                if (context.mounted) {
+                  Navigator.pop(context);
+                }
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Link copied to clipboard'), duration: Duration(seconds: 2)),
+                  );
+                }
+              },
+              icon: const Icon(Icons.copy, size: 18),
+              label: const Text('Copy Link'),
+              style: OutlinedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 12)),
+            )),
+            const SizedBox(width: 12),
+            Expanded(child: FilledButton.icon(
+              onPressed: () async {
+                Navigator.pop(context);
+                await Share.share(streamUrl, subject: title);
+              },
+              icon: const Icon(Icons.share, size: 18),
+              label: const Text('Share'),
+              style: FilledButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 12)),
+            )),
+          ]),
         ],
       ),
     );

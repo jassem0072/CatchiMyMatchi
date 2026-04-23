@@ -1,11 +1,14 @@
-import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../app/scoutai_app.dart';
-import '../services/api_config.dart';
+import '../features/analysis/models/analysis_run_request.dart';
+import '../features/analysis/models/analysis_selection_dto.dart';
+import '../features/analysis/models/analysis_selection_mapper.dart';
+import '../features/analysis/providers/analysis_run_providers.dart';
+import '../features/analysis/models/analysis_run_result.dart';
 import '../services/auth_storage.dart';
 import '../theme/app_colors.dart';
 import '../services/translations.dart';
@@ -16,19 +19,19 @@ import '../widgets/common.dart';
 /// { 'videoId': String, 'selection': { t0, x, y, w, h } }
 /// ```
 /// Calls POST /videos/:id/analyze and shows progress, then navigates to details.
-class AnalysisProgressScreen extends StatefulWidget {
+class AnalysisProgressScreen extends ConsumerStatefulWidget {
   const AnalysisProgressScreen({super.key});
 
   @override
-  State<AnalysisProgressScreen> createState() => _AnalysisProgressScreenState();
+  ConsumerState<AnalysisProgressScreen> createState() => _AnalysisProgressScreenState();
 }
 
-class _AnalysisProgressScreenState extends State<AnalysisProgressScreen>
+class _AnalysisProgressScreenState extends ConsumerState<AnalysisProgressScreen>
     with SingleTickerProviderStateMixin {
   bool _started = false;
   bool _done = false;
   String? _error;
-  Map<String, dynamic>? _result;
+  AnalysisRunResult? _result;
 
   // Animated progress ring
   late final AnimationController _ringCtrl;
@@ -90,32 +93,21 @@ class _AnalysisProgressScreenState extends State<AnalysisProgressScreen>
     _advanceSteps();
 
     try {
-      final uri = Uri.parse('${ApiConfig.baseUrl}/videos/$videoId/analyze');
-      final res = await http.post(
-        uri,
-        headers: {
-          'Authorization': 'Bearer $token',
-          'Content-Type': 'application/json',
-        },
-        body: jsonEncode({
-          'selection': selection,
-          'samplingFps': 2,
-        }),
+      final selectionEntity = AnalysisSelectionMapper.toEntity(
+        AnalysisSelectionDto.fromJson(selection),
       );
 
+      final request = AnalysisRunRequest(
+        videoId: videoId,
+        selection: selectionEntity,
+        samplingFps: 4,
+      );
+
+      final result = await ref.read(analysisRunServiceProvider).runAnalysis(request);
       if (!mounted) return;
-
-      if (res.statusCode >= 400) {
-        setState(() {
-          _error = 'Analysis failed (${res.statusCode}): ${res.body.length > 300 ? res.body.substring(0, 300) : res.body}';
-        });
-        return;
-      }
-
-      final data = jsonDecode(res.body) as Map<String, dynamic>;
       setState(() {
         _done = true;
-        _result = data;
+        _result = result;
         _stepIndex = _steps.length; // all done
       });
     } catch (e) {
@@ -137,7 +129,7 @@ class _AnalysisProgressScreenState extends State<AnalysisProgressScreen>
     if (_result == null) return;
     Navigator.of(context).pushReplacementNamed(
       AppRoutes.details,
-      arguments: _result, // pass raw AI response
+      arguments: _result!.raw,
     );
   }
 

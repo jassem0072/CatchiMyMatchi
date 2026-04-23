@@ -132,4 +132,21 @@ export class NotificationsService {
       data: { scouterId, message },
     });
   }
+
+  /** Notify an expert that their payout invoice is ready to download */
+  async notifyExpertInvoiceReady(
+    expertUserId: string,
+    invoiceId: string,
+    amountEur: number,
+  ): Promise<Notification> {
+    return this.create({
+      userId: expertUserId,
+      type: 'invoice_ready',
+      titleEN: '🧾 Your Invoice is Ready',
+      titleFR: '🧾 Votre facture est prête',
+      bodyEN: `Invoice ${invoiceId} (EUR ${amountEur.toFixed(2)}) is ready. Open Billing & Invoices to download your PDF.`,
+      bodyFR: `La facture ${invoiceId} (EUR ${amountEur.toFixed(2)}) est prête. Ouvrez Facturation & Factures pour télécharger votre PDF.`,
+      data: { invoiceId, amountEur },
+    });
+  }
 }

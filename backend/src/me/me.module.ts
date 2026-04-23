@@ -7,9 +7,10 @@ import { NotificationsModule } from '../notifications/notifications.module';
 import { UsersModule } from '../users/users.module';
 import { TeamsModule } from '../teams/teams.module';
 import { VideosModule } from '../videos/videos.module';
+import { AdminModule } from '../admin/admin.module';
 
 @Module({
-  imports: [VideosModule, UsersModule, AuthModule, ChallengesModule, NotificationsModule, TeamsModule],
+  imports: [VideosModule, UsersModule, AuthModule, ChallengesModule, NotificationsModule, TeamsModule, AdminModule],
   controllers: [MeController],
 })
 export class MeModule {}

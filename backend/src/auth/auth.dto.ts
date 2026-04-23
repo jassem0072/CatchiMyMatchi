@@ -17,6 +17,17 @@ export class RegisterDto {
   nation?: string;
 }
 
+export class RegisterAdminRequestDto {
+  @ApiProperty()
+  email!: string;
+
+  @ApiProperty()
+  password!: string;
+
+  @ApiPropertyOptional()
+  displayName?: string;
+}
+
 export class LoginDto {
   @ApiProperty()
   email!: string;
@@ -71,6 +82,45 @@ export class GoogleWebAuthDto {
 
   @ApiPropertyOptional({ description: 'Role for new users (player or scouter)' })
   role?: string;
+}
+
+export class AdminGoogleLoginDto {
+  @ApiPropertyOptional({ description: 'Google ID token from GIS sign-in on web' })
+  idToken?: string;
+
+  @ApiPropertyOptional({ description: 'Google access token fallback' })
+  accessToken?: string;
+
+  @ApiPropertyOptional({ description: 'Optional display name override for first-time linkage' })
+  displayName?: string;
+}
+
+export class UpdateAuthProfileDto {
+  @ApiPropertyOptional()
+  displayName?: string;
+
+  @ApiPropertyOptional()
+  position?: string;
+
+  @ApiPropertyOptional()
+  nation?: string;
+
+  @ApiPropertyOptional()
+  dateOfBirth?: string;
+
+  @ApiPropertyOptional()
+  height?: number;
+
+  @ApiPropertyOptional()
+  playerIdNumber?: string;
+}
+
+export class ChangeAuthPasswordDto {
+  @ApiProperty()
+  currentPassword!: string;
+
+  @ApiProperty()
+  newPassword!: string;
 }
 
 export class AuthTokenResponse {

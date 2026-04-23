@@ -1,5 +1,5 @@
-import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
-import { HydratedDocument } from 'mongoose';
+import { Prop, Schema, SchemaFactory } from "@nestjs/mongoose";
+import { HydratedDocument } from "mongoose";
 
 export type VideoDocument = HydratedDocument<Video>;
 
@@ -33,6 +33,14 @@ export class Video {
   @Prop({ type: Object, default: {} })
   playerAnalyses?: Record<string, Record<string, unknown>>;
 
+  /** Player screen-selection used during analysis, keyed by playerId.
+   *  Each entry: { frameTime: number; normX: number; normY: number } */
+  @Prop({ type: Object, default: {} })
+  playerSelections?: Record<
+    string,
+    { frameTime: number; normX: number; normY: number }
+  >;
+
   /** IDs of teammates tagged in this video */
   @Prop({ type: [String], default: [] })
   taggedPlayers!: string[];
@@ -42,7 +50,7 @@ export class Video {
   taggedTeams!: string[];
 
   /** 'public' = visible to scouts, 'private' = only owner & tagged players */
-  @Prop({ default: 'public', enum: ['public', 'private'] })
+  @Prop({ default: "public", enum: ["public", "private"] })
   visibility!: string;
 
   /** Montage highlight reel filename (stored in uploads dir) */

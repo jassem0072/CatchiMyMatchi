@@ -1,12 +1,11 @@
 import 'package:flutter/material.dart';
-import 'dart:convert';
-
-import 'package:http/http.dart' as http;
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../app/scoutai_app.dart';
+import '../core/network/api_exception.dart';
+import '../features/player/models/player_video.dart';
+import '../features/player/providers/player_providers.dart';
 import '../models/player_analysis.dart';
-import '../services/api_config.dart';
-import '../services/auth_storage.dart';
 import '../theme/app_colors.dart';
 import '../widgets/common.dart';
 
@@ -72,14 +71,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 }
 
-class _ExploreTab extends StatefulWidget {
+class _ExploreTab extends ConsumerStatefulWidget {
   const _ExploreTab();
 
   @override
-  State<_ExploreTab> createState() => _ExploreTabState();
+  ConsumerState<_ExploreTab> createState() => _ExploreTabState();
 }
 
-class _ExploreTabState extends State<_ExploreTab> {
+class _ExploreTabState extends ConsumerState<_ExploreTab> {
   bool _loading = true;
   String? _error;
   List<PlayerAnalysis> _items = const [];
@@ -90,96 +89,29 @@ class _ExploreTabState extends State<_ExploreTab> {
     _load();
   }
 
-  double _toDouble(dynamic v) {
-    if (v is num) return v.toDouble();
-    if (v is String) return double.tryParse(v) ?? 0;
-    return 0;
+  String _formatDate(DateTime? createdAt) {
+    if (createdAt == null) return '';
+    final d = createdAt.toLocal();
+    final mm = d.month.toString().padLeft(2, '0');
+    final dd = d.day.toString().padLeft(2, '0');
+    return '${d.year}-$mm-$dd';
   }
 
-  int _toInt(dynamic v) {
-    if (v is int) return v;
-    if (v is num) return v.round();
-    if (v is String) return int.tryParse(v) ?? 0;
-    return 0;
-  }
-
-  String _formatDate(dynamic createdAt) {
-    if (createdAt is String) {
-      final dt = DateTime.tryParse(createdAt);
-      if (dt != null) {
-        final d = dt.toLocal();
-        final mm = d.month.toString().padLeft(2, '0');
-        final dd = d.day.toString().padLeft(2, '0');
-        return '${d.year}-$mm-$dd';
-      }
-      return createdAt;
-    }
-    return '';
-  }
-
-  PlayerAnalysis _mapVideoToAnalysis(Map<String, dynamic> v) {
-    final id = (v['_id'] ?? v['id'] ?? '').toString();
-    final originalName = (v['originalName'] ?? v['filename'] ?? 'Video').toString();
-    final createdAt = _formatDate(v['createdAt']);
-
-    final lastAnalysis = v['lastAnalysis'];
-    final analysisMap = lastAnalysis is Map<String, dynamic> ? lastAnalysis : null;
-    final status = lastAnalysis == null ? AnalysisStatus.processing : AnalysisStatus.done;
-
-    final distance = _toDouble(
-      analysisMap?['distanceKm'] ??
-          analysisMap?['distance_km'] ??
-          analysisMap?['distance'] ??
-          (analysisMap?['metrics'] is Map<String, dynamic> ? (analysisMap?['metrics'] as Map<String, dynamic>)['distanceKm'] : null),
-    );
-    final maxSpeed = _toDouble(
-      analysisMap?['maxSpeedKmh'] ??
-          analysisMap?['max_speed_kmh'] ??
-          analysisMap?['maxSpeed'] ??
-          (analysisMap?['metrics'] is Map<String, dynamic> ? (analysisMap?['metrics'] as Map<String, dynamic>)['maxSpeedKmh'] : null),
-    );
-    final sprints = _toInt(
-      analysisMap?['sprints'] ??
-          analysisMap?['sprintCount'] ??
-          (analysisMap?['metrics'] is Map<String, dynamic> ? (analysisMap?['metrics'] as Map<String, dynamic>)['sprints'] : null),
-    );
+  PlayerAnalysis _mapVideoToAnalysis(PlayerVideo video) {
+    final createdAt = _formatDate(video.createdAt);
+    final status = video.lastAnalysis == null ? AnalysisStatus.processing : AnalysisStatus.done;
+    final analysis = video.lastAnalysis;
 
     return PlayerAnalysis(
-      id: id,
+      id: video.id,
       playerName: 'You',
       playerNumber: 0,
-      matchName: createdAt.isNotEmpty ? '$originalName • $createdAt' : originalName,
-      distanceKm: distance,
-      maxSpeedKmh: maxSpeed,
-      sprints: sprints,
+      matchName: createdAt.isNotEmpty ? '${video.originalName} • $createdAt' : video.originalName,
+      distanceKm: analysis?.distanceKm ?? 0,
+      maxSpeedKmh: analysis?.maxSpeedKmh ?? 0,
+      sprints: analysis?.sprints ?? 0,
       status: status,
     );
-  }
-
-  Future<List<dynamic>> _fetchVideos(String token) async {
-    final meUri = Uri.parse('${ApiConfig.baseUrl}/me/videos');
-    final res = await http.get(meUri, headers: {'Authorization': 'Bearer $token'});
-
-    if (res.statusCode == 403) {
-      final fallbackUri = Uri.parse('${ApiConfig.baseUrl}/videos');
-      final res2 = await http.get(fallbackUri, headers: {'Authorization': 'Bearer $token'});
-      if (res2.statusCode >= 400) {
-        final msg = res2.body.trim();
-        throw Exception(msg.isNotEmpty ? msg : 'Failed to load videos (${res2.statusCode})');
-      }
-      final parsed = jsonDecode(res2.body);
-      if (parsed is List) return parsed;
-      throw Exception('Unexpected videos response');
-    }
-
-    if (res.statusCode >= 400) {
-      final msg = res.body.trim();
-      throw Exception(msg.isNotEmpty ? msg : 'Failed to load videos (${res.statusCode})');
-    }
-
-    final parsed = jsonDecode(res.body);
-    if (parsed is List) return parsed;
-    throw Exception('Unexpected videos response');
   }
 
   Future<void> _load() async {
@@ -188,24 +120,22 @@ class _ExploreTabState extends State<_ExploreTab> {
       _error = null;
     });
 
-    final token = await AuthStorage.loadToken();
-    if (!mounted) return;
-    if (token == null) {
-      Navigator.of(context).pushNamedAndRemoveUntil(AppRoutes.login, (_) => false);
-      return;
-    }
-
     try {
-      final raw = await _fetchVideos(token);
-      final items = <PlayerAnalysis>[];
-      for (final e in raw) {
-        if (e is Map) {
-          items.add(_mapVideoToAnalysis(Map<String, dynamic>.from(e as Map)));
-        }
-      }
+      final videos = await ref.read(playerServiceProvider).getCurrentPlayerVideos();
+      final items = videos.map(_mapVideoToAnalysis).toList(growable: false);
       if (!mounted) return;
       setState(() {
         _items = items;
+        _loading = false;
+      });
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      if (e.statusCode == 401) {
+        Navigator.of(context).pushNamedAndRemoveUntil(AppRoutes.login, (_) => false);
+        return;
+      }
+      setState(() {
+        _error = e.message;
         _loading = false;
       });
     } catch (e) {
