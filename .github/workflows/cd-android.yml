@@ -11,7 +11,7 @@ concurrency:
 
 jobs:
   release:
-    name: Build & Deploy to Google Play
+    name: Build Release AAB
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -27,7 +27,6 @@ jobs:
           if [ -z "${{ secrets.KEYSTORE_PASSWORD }}" ]; then missing="$missing KEYSTORE_PASSWORD"; fi
           if [ -z "${{ secrets.KEY_ALIAS }}" ]; then missing="$missing KEY_ALIAS"; fi
           if [ -z "${{ secrets.KEY_PASSWORD }}" ]; then missing="$missing KEY_PASSWORD"; fi
-          if [ -z "${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}" ]; then missing="$missing GOOGLE_PLAY_SERVICE_ACCOUNT_JSON"; fi
           if [ -z "${{ secrets.API_BASE_URL }}" ]; then missing="$missing API_BASE_URL"; fi
           if [ -n "$missing" ]; then
             echo "Missing required secrets:$missing"
@@ -56,12 +55,6 @@ jobs:
         run: |
           echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > android/app/keystore.jks
 
-      - name: Write Google Play service account JSON
-        run: |
-          cat > android/play-service-account.json <<'EOF'
-          ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
-          EOF
-
       - name: Build release AAB
         run: |
           flutter build appbundle --release \
@@ -71,14 +64,6 @@ jobs:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-
-      - name: Deploy to Google Play (Internal Track)
-        run: |
-          cd android
-          bundle install
-          bundle exec fastlane deploy
-        env:
-          SUPPLY_JSON_KEY: play-service-account.json
 
       - name: Upload AAB artifact
         uses: actions/upload-artifact@v4
